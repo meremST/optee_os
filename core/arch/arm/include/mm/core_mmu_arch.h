@@ -76,9 +76,7 @@
  * that these magic numbers are correct.
  */
 #define CORE_MMU_BASE_TABLE_OFFSET \
-	(CFG_TEE_CORE_NB_CORE * \
-	 BIT(CFG_LPAE_ADDR_SPACE_BITS - CORE_MMU_BASE_TABLE_SHIFT) * \
-	 U(8))
+	(BIT(CFG_LPAE_ADDR_SPACE_BITS - CORE_MMU_BASE_TABLE_SHIFT) * U(8))
 #endif
 
 #ifndef __ASSEMBLER__
@@ -201,6 +199,11 @@ static inline unsigned int core_mmu_get_va_width(void)
 		return CFG_LPAE_ADDR_SPACE_BITS;
 	}
 	return 32;
+}
+
+static inline bool core_mmu_va_is_valid(vaddr_t va)
+{
+	return va < BIT64(core_mmu_get_va_width());
 }
 
 static inline bool core_mmu_level_in_range(unsigned int level)

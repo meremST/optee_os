@@ -6,6 +6,7 @@
 #include <assert.h>
 #include <bitstring.h>
 #include <config.h>
+#include <kernel/boot.h>
 #include <kernel/cache_helpers.h>
 #include <kernel/misc.h>
 #include <kernel/panic.h>
@@ -15,8 +16,10 @@
 #include <kernel/tlb_helpers.h>
 #include <mm/core_memprot.h>
 #include <mm/core_mmu.h>
+#include <mm/phys_mem.h>
 #include <platform_config.h>
 #include <riscv.h>
+#include <stdalign.h>
 #include <stdlib.h>
 #include <string.h>
 #include <trace.h>
@@ -36,7 +39,9 @@
 #define debug_print(...) ((void)0)
 #endif
 
-static bitstr_t bit_decl(g_asid, RISCV_MMU_ASID_WIDTH) __nex_bss;
+#define IS_PAGE_ALIGNED(addr)	IS_ALIGNED(addr, SMALL_PAGE_SIZE)
+
+static bitstr_t bit_decl(g_asid, RISCV_SATP_ASID_WIDTH) __nex_bss;
 static unsigned int g_asid_spinlock __nex_bss = SPINLOCK_UNLOCK;
 
 struct mmu_pte {
@@ -49,6 +54,7 @@ struct mmu_pgt {
 
 #define RISCV_MMU_PGT_SIZE	(sizeof(struct mmu_pgt))
 
+#ifndef CFG_DYN_CONFIG
 static struct mmu_pgt root_pgt[CFG_TEE_CORE_NB_CORE]
 	__aligned(RISCV_PGSIZE)
 	__section(".nozi.mmu.root_pgt");
@@ -58,6 +64,10 @@ static struct mmu_pgt pool_pgts[RISCV_MMU_MAX_PGTS]
 
 static struct mmu_pgt user_pgts[CFG_NUM_THREADS]
 	__aligned(RISCV_PGSIZE) __section(".nozi.mmu.usr_pgts");
+#if (RISCV_SATP_MODE >= SATP_MODE_SV48)
+static struct mmu_pgt *user_vpn2_table_va[CFG_TEE_CORE_NB_CORE];
+#endif
+#endif
 
 static int user_va_idx __nex_data = -1;
 
@@ -67,15 +77,25 @@ struct mmu_partition {
 	struct mmu_pgt *user_pgts;
 	unsigned int pgts_used;
 	unsigned int asid;
+#if (RISCV_SATP_MODE >= SATP_MODE_SV48)
+	struct mmu_pgt **user_vpn2_table_va;
+#endif
 };
 
+#ifdef CFG_DYN_CONFIG
+static struct mmu_partition default_partition __nex_bss;
+#else
 static struct mmu_partition default_partition __nex_data  = {
 	.root_pgt = root_pgt,
 	.pool_pgts = pool_pgts,
 	.user_pgts = user_pgts,
 	.pgts_used = 0,
-	.asid = 0
+	.asid = 0,
+#if (RISCV_SATP_MODE >= SATP_MODE_SV48)
+	.user_vpn2_table_va = user_vpn2_table_va,
+#endif
 };
+#endif
 
 static struct mmu_pte *core_mmu_table_get_entry(struct mmu_pgt *pgt,
 						unsigned int idx)
@@ -111,7 +131,7 @@ static bool core_mmu_entry_is_leaf(struct mmu_pte *pte)
 
 static bool __maybe_unused core_mmu_entry_is_branch(struct mmu_pte *pte)
 {
-	return !core_mmu_entry_is_leaf(pte);
+	return core_mmu_entry_is_valid(pte) && !core_mmu_entry_is_leaf(pte);
 }
 
 static unsigned long core_mmu_pte_create(unsigned long ppn, uint8_t pte_bits)
@@ -241,14 +261,35 @@ static unsigned int core_mmu_pgt_idx(vaddr_t va, unsigned int level)
 	return idx & RISCV_MMU_VPN_MASK;
 }
 
+/* Get the pointed VA base of specific PTE in page table */
+static inline vaddr_t core_mmu_pgt_get_va_base(unsigned int level,
+					       unsigned int idx)
+{
+#ifdef RV32
+	return SHIFT_U32(idx, CORE_MMU_SHIFT_OF_LEVEL(level));
+#else
+	vaddr_t va_base = SHIFT_U64(idx, CORE_MMU_SHIFT_OF_LEVEL(level));
+	vaddr_t va_width_msb = BIT64(RISCV_MMU_VA_WIDTH - 1);
+	vaddr_t va_extended_mask = GENMASK_64(63, RISCV_MMU_VA_WIDTH);
+
+	if (va_base & va_width_msb)
+		return va_extended_mask | va_base;
+
+	return va_base;
+#endif
+}
+
 static struct mmu_partition *core_mmu_get_prtn(void)
 {
 	return &default_partition;
 }
 
-static struct mmu_pgt *core_mmu_get_root_pgt_va(struct mmu_partition *prtn)
+static struct mmu_pgt *core_mmu_get_root_pgt_va(struct mmu_partition *prtn,
+						size_t core_pos)
 {
-	return prtn->root_pgt + get_core_pos();
+	assert(core_pos < CFG_TEE_CORE_NB_CORE);
+
+	return prtn->root_pgt + core_pos;
 }
 
 static struct mmu_pgt *core_mmu_get_ta_pgt_va(struct mmu_partition *prtn)
@@ -260,29 +301,223 @@ static struct mmu_pgt *core_mmu_pgt_alloc(struct mmu_partition *prtn)
 {
 	struct mmu_pgt *pgt = NULL;
 
-	if (prtn->pgts_used >= RISCV_MMU_MAX_PGTS) {
-		debug_print("%u pgts exhausted", RISCV_MMU_MAX_PGTS);
-		panic();
-		return NULL;
+	if (IS_ENABLED(CFG_DYN_CONFIG)) {
+		if (cpu_mmu_enabled()) {
+			tee_mm_entry_t *mm = NULL;
+			paddr_t pa = 0;
+			size_t size = RISCV_MMU_PGT_SIZE;
+
+			if (prtn == core_mmu_get_prtn()) {
+				mm = phys_mem_core_alloc(size);
+				if (!mm)
+					EMSG("Phys mem exhausted");
+			} else {
+				mm = nex_phys_mem_core_alloc(size);
+				if (!mm)
+					EMSG("Phys nex mem exhausted");
+			}
+			if (!mm)
+				return NULL;
+			pa = tee_mm_get_smem(mm);
+
+			pgt = phys_to_virt(pa, MEM_AREA_SEC_RAM_OVERALL,
+					   RISCV_MMU_PGT_SIZE);
+			assert(pgt);
+		} else {
+			pgt = boot_mem_alloc(RISCV_MMU_PGT_SIZE,
+					     RISCV_MMU_PGT_SIZE);
+			if (prtn->pool_pgts) {
+				assert((vaddr_t)prtn->pool_pgts +
+				       prtn->pgts_used *
+				       RISCV_MMU_PGT_SIZE == (vaddr_t)pgt);
+			} else {
+				boot_mem_add_reloc(&prtn->pool_pgts);
+				prtn->pool_pgts = pgt;
+			}
+		}
+		prtn->pgts_used++;
+		DMSG("pgts used %u", prtn->pgts_used);
+	} else {
+		if (prtn->pgts_used >= RISCV_MMU_MAX_PGTS) {
+			debug_print("%u pgts exhausted", RISCV_MMU_MAX_PGTS);
+			return NULL;
+		}
+
+		pgt = &prtn->pool_pgts[prtn->pgts_used++];
+
+		memset(pgt, 0, RISCV_MMU_PGT_SIZE);
+
+		DMSG("pgts used %u / %u", prtn->pgts_used,
+		     RISCV_MMU_MAX_PGTS);
 	}
-
-	pgt = &prtn->pool_pgts[prtn->pgts_used++];
-
-	memset(pgt, 0, RISCV_MMU_PGT_SIZE);
-
-	debug_print("pgts used %u / %u", prtn->pgts_used, RISCV_MMU_MAX_PGTS);
 
 	return pgt;
 }
 
-static void core_init_mmu_prtn_ta_core(struct mmu_partition *prtn __unused,
-				       unsigned int core __unused)
+/*
+ * Given an entry that points to a table.
+ * If mmu is disabled, returns the pa of pointed table.
+ * If mmu is enabled, returns the va of pointed table.
+ * returns NULL otherwise.
+ */
+static struct mmu_pgt *core_mmu_xlat_table_entry_pa2va(struct mmu_pte *pte,
+						       struct mmu_pgt *pgt)
 {
-	/*
-	 * user_va_idx is the index in CORE_MMU_BASE_TABLE_LEVEL.
-	 * The entry holds pointer to the user mapping table in next level
-	 * that changes per core. Therefore, nothing to do.
-	 */
+	struct mmu_pgt *va = NULL;
+
+	if (core_mmu_entry_is_invalid(pte) ||
+	    core_mmu_entry_is_leaf(pte))
+		return NULL;
+
+	if (!cpu_mmu_enabled())
+		return (struct mmu_pgt *)pte_to_pa(pte);
+
+	va = phys_to_virt(pte_to_pa(pte), MEM_AREA_TEE_RAM_RW_DATA,
+			  sizeof(*pgt));
+	if (!va)
+		va = phys_to_virt(pte_to_pa(pte), MEM_AREA_SEC_RAM_OVERALL,
+				  sizeof(*pgt));
+
+	return va;
+}
+
+#if (RISCV_SATP_MODE >= SATP_MODE_SV48)
+static struct mmu_pgt *core_mmu_get_vpn2_ta_table(struct mmu_partition *prtn,
+						  size_t core_pos)
+{
+	assert(core_pos < CFG_TEE_CORE_NB_CORE);
+	return prtn->user_vpn2_table_va[core_pos];
+}
+
+static void core_mmu_set_vpn2_ta_table(struct mmu_partition *prtn,
+				       size_t core_pos, struct mmu_pgt *pgt)
+{
+	assert(core_pos < CFG_TEE_CORE_NB_CORE);
+	prtn->user_vpn2_table_va[core_pos] = pgt;
+}
+
+/*
+ * Giving a page table, return the base address of next level page table from
+ * given index of entry in it.
+ */
+static struct mmu_pgt *core_mmu_get_next_level_pgt(struct mmu_pgt *pgt,
+						   unsigned int idx)
+{
+	struct mmu_pte *pte = NULL;
+
+	pte = core_mmu_table_get_entry(pgt, idx);
+	assert(core_mmu_entry_is_branch(pte));
+
+	return core_mmu_xlat_table_entry_pa2va(pte, pgt);
+}
+#endif
+
+/*
+ * For a table entry that points to a table - allocate and copy to
+ * a new pointed table. This is done for the requested entry,
+ * without going deeper into the pointed table entries.
+ *
+ * A success is returned for non-table entries, as nothing to do there.
+ */
+__maybe_unused
+static bool core_mmu_entry_copy(struct core_mmu_table_info *tbl_info,
+				unsigned int idx)
+{
+	struct mmu_pgt *orig_pgt = NULL;
+	struct mmu_pgt *new_pgt = NULL;
+	struct mmu_pte *pte = NULL;
+	struct mmu_partition *prtn = NULL;
+	unsigned long ptp = 0;
+
+	prtn = &default_partition;
+	assert(prtn);
+
+	if (idx >= tbl_info->num_entries)
+		return false;
+
+	orig_pgt = tbl_info->table;
+	pte = core_mmu_table_get_entry(orig_pgt, idx);
+
+	/* Nothing to do for non-table entries */
+	if (core_mmu_entry_is_leaf(pte) || tbl_info->level >= RISCV_PGLEVELS)
+		return true;
+
+	new_pgt = core_mmu_pgt_alloc(prtn);
+	if (!new_pgt)
+		return false;
+
+	orig_pgt = core_mmu_xlat_table_entry_pa2va(pte, orig_pgt);
+	if (!orig_pgt)
+		return false;
+
+	/* Copy original table content to new table */
+	memcpy(new_pgt, orig_pgt, sizeof(struct mmu_pgt));
+
+	/* Point to the new table */
+	ptp = core_mmu_ptp_create(pa_to_ppn((paddr_t)new_pgt));
+	core_mmu_entry_set(pte, ptp);
+
+	return true;
+}
+
+/*
+ * Setup entries inside level 4, 3, and 2 page tables for TAs memory mapping
+ *
+ * Sv39 - user_va_idx is already in level 2 page table, so nothing to do.
+ * Sv48 - we need to allocate entry 0 of level 3 page table, and let it point to
+ *        level 2 page table.
+ * Sv57 - we need to allocate entry 0 of level 4 page table, and let it point to
+ *        level 3 page table. We need to further allocate entry 0 of the level 3
+ *        page table, and let it point to level 2 page table.
+ */
+static void core_init_mmu_prtn_ta_core(struct mmu_partition *prtn
+				       __maybe_unused,
+				       unsigned int core __maybe_unused)
+{
+#if (RISCV_SATP_MODE >= SATP_MODE_SV48)
+	unsigned int level = CORE_MMU_BASE_TABLE_LEVEL;
+	struct core_mmu_table_info tbl_info = { };
+	struct mmu_pgt *pgt = NULL;
+	struct mmu_pte *pte = NULL;
+
+	assert(user_va_idx != -1);
+
+	while (level > CORE_MMU_VPN2_LEVEL) {
+		if (level == CORE_MMU_BASE_TABLE_LEVEL) {
+			/* First level: get root page table */
+			pgt = core_mmu_get_root_pgt_va(prtn, core);
+		} else {
+			/* Other levels: get table from PTE of previous level */
+			pgt = core_mmu_get_next_level_pgt(pgt, 0);
+		}
+
+		core_mmu_set_info_table(&tbl_info, level, 0, pgt);
+
+		/*
+		 * If this isn't the core that created the initial tables
+		 * mappings, then the table must be copied,
+		 * as it will hold pointer to the next mapping table
+		 * that changes per core.
+		 */
+		if (core != get_core_pos()) {
+			if (!core_mmu_entry_copy(&tbl_info, 0))
+				panic();
+		}
+
+		if (!core_mmu_entry_to_finer_grained(&tbl_info, 0, true))
+			panic();
+
+		/* Now index 0 of the table should be pointer to next level. */
+		pte = core_mmu_table_get_entry(pgt, 0);
+		assert(core_mmu_entry_is_branch(pte));
+
+		level--;
+	}
+
+	pgt = core_mmu_xlat_table_entry_pa2va(pte, pgt);
+	assert(pgt);
+	core_mmu_set_vpn2_ta_table(prtn, core, pgt);
+#endif
 }
 
 static void core_init_mmu_prtn_ta(struct mmu_partition *prtn)
@@ -300,48 +535,37 @@ static void core_init_mmu_prtn_tee(struct mmu_partition *prtn,
 				   struct memory_map *mem_map)
 {
 	size_t n = 0;
-	void *pgt = core_mmu_get_root_pgt_va(prtn);
+
+	assert(prtn && mem_map);
+
+	for (n = 0; n < mem_map->count; n++) {
+		struct tee_mmap_region *mm = mem_map->map + n;
+
+		debug_print(" %010" PRIxVA " %010" PRIxPA " %10zx %x",
+			    mm->va, mm->pa, mm->size, mm->attr);
+
+		if (!IS_PAGE_ALIGNED(mm->pa) || !IS_PAGE_ALIGNED(mm->size))
+			panic("unaligned region");
+	}
 
 	/* Clear table before using it. */
 	memset(prtn->root_pgt, 0, RISCV_MMU_PGT_SIZE * CFG_TEE_CORE_NB_CORE);
-	memset(pgt, 0, RISCV_MMU_PGT_SIZE);
-	memset(prtn->pool_pgts, 0, RISCV_MMU_MAX_PGTS * RISCV_MMU_PGT_SIZE);
 
 	for (n = 0; n < mem_map->count; n++)
-		if (!core_mmu_is_dynamic_vaspace(mem_map->map + n))
-			core_mmu_map_region(prtn, mem_map->map + n);
+		core_mmu_map_region(prtn, mem_map->map + n);
 
 	/*
 	 * Primary mapping table is ready at index `get_core_pos()`
 	 * whose value may not be ZERO. Take this index as copy source.
 	 */
 	for (n = 0; n < CFG_TEE_CORE_NB_CORE; n++) {
-		if (n != get_core_pos())
-			memcpy(&prtn->root_pgt[n],
-			       &prtn->root_pgt[get_core_pos()],
-			       RISCV_MMU_PGT_SIZE);
+		if (n == get_core_pos())
+			continue;
+
+		memcpy(core_mmu_get_root_pgt_va(prtn, n),
+		       core_mmu_get_root_pgt_va(prtn, get_core_pos()),
+		       RISCV_MMU_PGT_SIZE);
 	}
-}
-
-/*
- * Given an entry that points to a table.
- * If mmu is disabled, returns the pa of pointed table.
- * If mmu is enabled, returns the va of pointed table.
- * returns NULL otherwise.
- */
-static struct mmu_pgt *core_mmu_xlat_table_entry_pa2va(struct mmu_pte *pte,
-						       struct mmu_pgt *pgt)
-{
-	if (core_mmu_entry_is_invalid(pte) ||
-	    core_mmu_entry_is_leaf(pte))
-		return NULL;
-
-	if (!cpu_mmu_enabled())
-		return (struct mmu_pgt *)pte_to_pa(pte);
-
-	return phys_to_virt(pte_to_pa(pte),
-			    MEM_AREA_TEE_RAM_RW_DATA,
-			    sizeof(*pgt));
 }
 
 void tlbi_va_range(vaddr_t va, size_t len,
@@ -430,7 +654,7 @@ unsigned int asid_alloc(void)
 	unsigned int r = 0;
 	int i = 0;
 
-	bit_ffc(g_asid, RISCV_MMU_ASID_WIDTH, &i);
+	bit_ffc(g_asid, (int)RISCV_SATP_ASID_WIDTH, &i);
 	if (i == -1) {
 		r = 0;
 	} else {
@@ -448,9 +672,9 @@ void asid_free(unsigned int asid)
 	uint32_t exceptions = cpu_spin_lock_xsave(&g_asid_spinlock);
 
 	if (asid) {
-		int i = asid - 1;
+		unsigned int i = asid - 1;
 
-		assert(i < RISCV_MMU_ASID_WIDTH && bit_test(g_asid, i));
+		assert(i < RISCV_SATP_ASID_WIDTH && bit_test(g_asid, i));
 		bit_clear(g_asid, i);
 	}
 
@@ -470,7 +694,7 @@ bool arch_va2pa_helper(void *va, paddr_t *pa)
 
 	assert(pa);
 
-	pgt = core_mmu_get_root_pgt_va(prtn);
+	pgt = core_mmu_get_root_pgt_va(prtn, get_core_pos());
 
 	for (level = CORE_MMU_BASE_TABLE_LEVEL; level >= 0; level--) {
 		idx = core_mmu_pgt_idx(vaddr, level);
@@ -491,6 +715,31 @@ bool arch_va2pa_helper(void *va, paddr_t *pa)
 
 	thread_unmask_exceptions(exceptions);
 	return false;
+}
+
+vaddr_t arch_aslr_base_addr(vaddr_t start_addr, uint64_t seed,
+			    unsigned int iteration_count)
+{
+	const unsigned int va_width = core_mmu_get_va_width();
+	const vaddr_t va_mask = GENMASK_64(63, SMALL_PAGE_SHIFT);
+	const vaddr_t va_width_msb = BIT64(va_width - 1);
+	const vaddr_t va_extended_mask = GENMASK_64(63, va_width);
+	vaddr_t base_addr = start_addr + seed;
+
+	if (iteration_count)
+		base_addr ^= BIT64(va_width - iteration_count);
+
+	/*
+	 * If the MSB is set, map the base address to the top
+	 * half of the virtual address space by extending 1s
+	 * to 64-bit; otherwise, map it to the bottom half.
+	 */
+	if (base_addr & va_width_msb)
+		base_addr |= va_extended_mask;
+	else
+		base_addr &= ~va_extended_mask;
+
+	return base_addr & va_mask;
 }
 
 bool cpu_mmu_enabled(void)
@@ -517,7 +766,7 @@ bool core_mmu_find_table(struct mmu_partition *prtn, vaddr_t va,
 	if (!prtn)
 		prtn = core_mmu_get_prtn();
 
-	pgt = core_mmu_get_root_pgt_va(prtn);
+	pgt = core_mmu_get_root_pgt_va(prtn, get_core_pos());
 
 	while (true) {
 		idx = core_mmu_pgt_idx(va - va_base, level);
@@ -532,7 +781,7 @@ bool core_mmu_find_table(struct mmu_partition *prtn, vaddr_t va,
 		pgt = core_mmu_xlat_table_entry_pa2va(pte, pgt);
 		if (!pgt)
 			goto out;
-		va_base += SHIFT_U64(idx, CORE_MMU_SHIFT_OF_LEVEL(level));
+		va_base += core_mmu_pgt_get_va_base(level, idx);
 		level--;
 	}
 out:
@@ -613,13 +862,58 @@ void core_mmu_set_entry_primitive(void *table, size_t level, size_t idx,
 	core_mmu_entry_set(pte, core_mmu_pte_create(pa_to_ppn(pa), pte_bits));
 }
 
+/*
+ * Due to OP-TEE design limitation, TAs page table should be an entry
+ * inside a level 2 (VPN[2]) page table.
+ *
+ * Available options are only these:
+ * For Sv57:
+ * - base level 4 entry 0 - [0GB, 256TB[
+ *   - level 3 entry 0 - [0GB, 512GB[
+ *     - level 2 entry 0 - [0GB, 1GB[
+ *     - level 2 entry 1 - [1GB, 2GB[           <----
+ *     - level 2 entry 2 - [2GB, 3GB[           <----
+ *     - level 2 entry 3 - [3GB, 4GB[           <----
+ *     - level 2 entry 4 - [4GB, 5GB[
+ *     - ...
+ *   - ...
+ * - ...
+ *
+ * For Sv48:
+ * - base level 3 entry 0 - [0GB, 512GB[
+ *   - level 2 entry 0 - [0GB, 1GB[
+ *   - level 2 entry 1 - [1GB, 2GB[           <----
+ *   - level 2 entry 2 - [2GB, 3GB[           <----
+ *   - level 2 entry 3 - [3GB, 4GB[           <----
+ *   - level 2 entry 4 - [4GB, 5GB[
+ *   - ...
+ * - ...
+ *
+ * For Sv39:
+ * - base level 2 entry 0 - [0GB, 1GB[
+ * - base level 2 entry 1 - [1GB, 2GB[        <----
+ * - base level 2 entry 2 - [2GB, 3GB[        <----
+ * - base level 2 entry 3 - [3GB, 4GB[        <----
+ * - base level 2 entry 4 - [4GB, 5GB[
+ * - ...
+ */
 static void set_user_va_idx(struct mmu_partition *prtn)
 {
 	struct mmu_pgt *pgt = NULL;
-	struct mmu_pte *pte = NULL;
+	__maybe_unused struct mmu_pte *pte = NULL;
+	__maybe_unused unsigned int level = CORE_MMU_BASE_TABLE_LEVEL;
 	unsigned int idx = 0;
 
-	pgt = core_mmu_get_root_pgt_va(prtn);
+	pgt = core_mmu_get_root_pgt_va(prtn, get_core_pos());
+
+#if (RISCV_SATP_MODE >= SATP_MODE_SV48)
+	/* Traverse from root page table to level 2 page table. */
+	while (level > CORE_MMU_VPN2_LEVEL) {
+		pgt = core_mmu_get_next_level_pgt(pgt, 0);
+		assert(pgt);
+		level--;
+	}
+#endif
 
 	for (idx = 1 ; idx < RISCV_PTES_PER_PT; idx++) {
 		pte = core_mmu_table_get_entry(pgt, idx);
@@ -635,10 +929,15 @@ static void set_user_va_idx(struct mmu_partition *prtn)
 static struct mmu_pte *
 core_mmu_get_user_mapping_entry(struct mmu_partition *prtn)
 {
-	struct mmu_pgt *pgt = core_mmu_get_root_pgt_va(prtn);
+	struct mmu_pgt *pgt = NULL;
 
 	assert(core_mmu_user_va_range_is_defined());
 
+#if (RISCV_SATP_MODE >= SATP_MODE_SV48)
+	pgt = core_mmu_get_vpn2_ta_table(prtn, get_core_pos());
+#else
+	pgt = core_mmu_get_root_pgt_va(prtn, get_core_pos());
+#endif
 	return core_mmu_table_get_entry(pgt, user_va_idx);
 }
 
@@ -678,11 +977,17 @@ void core_mmu_get_user_va_range(vaddr_t *base, size_t *size)
 {
 	assert(core_mmu_user_va_range_is_defined());
 
+#ifdef RV64
 	if (base)
-		*base = SHIFT_U64(user_va_idx, CORE_MMU_BASE_TABLE_SHIFT);
-
+		*base = SHIFT_U64(user_va_idx, CORE_MMU_VPN2_SHIFT);
 	if (size)
-		*size =  BIT64(CORE_MMU_BASE_TABLE_SHIFT);
+		*size =  BIT64(CORE_MMU_VPN2_SHIFT);
+#else
+	if (base)
+		*base = SHIFT_U64(user_va_idx, CORE_MMU_VPN1_SHIFT);
+	if (size)
+		*size =  BIT64(CORE_MMU_VPN1_SHIFT);
+#endif
 }
 
 void core_mmu_get_user_pgdir(struct core_mmu_table_info *pgd_info)
@@ -745,27 +1050,46 @@ void core_init_mmu_prtn(struct mmu_partition *prtn, struct memory_map *mem_map)
 
 void core_init_mmu(struct memory_map *mem_map)
 {
-	uint64_t max_va = 0;
+	struct mmu_partition *prtn = &default_partition;
 	size_t n = 0;
 
-	static_assert((RISCV_MMU_MAX_PGTS * RISCV_MMU_PGT_SIZE) ==
-			    sizeof(pool_pgts));
+	if (IS_ENABLED(CFG_DYN_CONFIG)) {
+		prtn->root_pgt = boot_mem_alloc(RISCV_MMU_PGT_SIZE *
+						CFG_TEE_CORE_NB_CORE,
+						RISCV_MMU_PGT_SIZE);
+		boot_mem_add_reloc(&prtn->root_pgt);
 
-	/* Initialize default pagetables */
-	core_init_mmu_prtn_tee(&default_partition, mem_map);
-
-	for (n = 0; n < mem_map->count; n++) {
-		vaddr_t va_end = mem_map->map[n].va + mem_map->map[n].size - 1;
-
-		if (va_end > max_va)
-			max_va = va_end;
+		prtn->user_pgts = boot_mem_alloc(RISCV_MMU_PGT_SIZE *
+						 CFG_NUM_THREADS,
+						 RISCV_MMU_PGT_SIZE);
+		boot_mem_add_reloc(&prtn->user_pgts);
+#if (RISCV_SATP_MODE >= SATP_MODE_SV48)
+		prtn->user_vpn2_table_va =
+			boot_mem_alloc(CFG_TEE_CORE_NB_CORE *
+				       sizeof(struct mmu_pgt *),
+				       alignof(sizeof(struct mmu_pgt *)));
+		boot_mem_add_reloc(&prtn->user_vpn2_table_va);
+#endif
 	}
 
-	set_user_va_idx(&default_partition);
+#if (RISCV_SATP_MODE >= SATP_MODE_SV48)
+	for (n = 0; n < CFG_TEE_CORE_NB_CORE; n++)
+		boot_mem_add_reloc(&prtn->user_vpn2_table_va[n]);
+#endif
 
-	core_init_mmu_prtn_ta(&default_partition);
+	/* Initialize default pagetables */
+	core_init_mmu_prtn_tee(prtn, mem_map);
 
-	assert(max_va < BIT64(RISCV_MMU_VA_WIDTH));
+	for (n = 0; n < mem_map->count; n++) {
+		if (!core_mmu_va_is_valid(mem_map->map[n].va) ||
+		    !core_mmu_va_is_valid(mem_map->map[n].va +
+					  mem_map->map[n].size - 1))
+			panic("Invalid VA range in memory map");
+	}
+
+	set_user_va_idx(prtn);
+
+	core_init_mmu_prtn_ta(prtn);
 }
 
 void core_init_mmu_regs(struct core_mmu_config *cfg)

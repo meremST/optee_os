@@ -27,6 +27,8 @@ endif
 
 CFG_MMAP_REGIONS ?= 13
 CFG_RESERVED_VASPACE_SIZE ?= (1024 * 1024 * 10)
+CFG_NEX_DYN_VASPACE_SIZE ?= (1024 * 1024)
+CFG_TEE_DYN_VASPACE_SIZE ?= (1024 * 1024)
 
 ifeq ($(CFG_ARM64_core),y)
 ifeq ($(CFG_ARM32_core),y)
@@ -213,6 +215,10 @@ core-platform-subdirs += \
 
 ifneq ($(CFG_WITH_ARM_TRUSTED_FW),y)
 core-platform-subdirs += $(arch-dir)/sm
+endif
+
+ifneq ($(CFG_TEE_CORE_EMBED_INTERNAL_TESTS),y)
+core-platform-subdirs += $(arch-dir)/tests
 endif
 
 arm64-platform-cppflags += -DARM64=1 -D__LP64__=1

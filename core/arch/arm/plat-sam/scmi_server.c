@@ -6,6 +6,8 @@
 
 #include <at91_clk.h>
 #include <confine_array_index.h>
+#include <drivers/atmel_rstc.h>
+#include <drivers/rstctrl.h>
 #include <drivers/scmi-msg.h>
 #include <drivers/scmi.h>
 #include <dt-bindings/clock/at91.h>
@@ -16,8 +18,34 @@ static_assert(SMT_BUF_SLOT_SIZE <= CFG_SCMI_SHMEM_SIZE);
 
 register_phys_mem(MEM_AREA_IO_NSEC, CFG_SCMI_SHMEM_START, CFG_SCMI_SHMEM_SIZE);
 
+#define RESET_CELL(_scmi_id, _id, _name) \
+	[(_scmi_id)] = { \
+		.reset_id = (_id), \
+		.name = (_name), \
+	}
+
+#define RST_SCMI_USB1 0
+#define RST_SCMI_USB2 1
+#define RST_SCMI_USB3 2
+
+struct sam_scmi_rd {
+	unsigned int reset_id;
+	const char *name;
+	struct rstctrl *rstctrl;
+};
+
+static struct sam_scmi_rd sam_scmi_reset_domain[] = {
+#ifdef CFG_SAMA7G5
+	RESET_CELL(RST_SCMI_USB1, SHIFT_U32(0xE4, RESET_ID_SHIFT) | 4, "USB1"),
+	RESET_CELL(RST_SCMI_USB2, SHIFT_U32(0xE4, RESET_ID_SHIFT) | 5, "USB2"),
+	RESET_CELL(RST_SCMI_USB3, SHIFT_U32(0xE4, RESET_ID_SHIFT) | 6, "USB3"),
+#endif
+};
+
 struct channel_resources {
 	struct scmi_msg_channel *channel;
+	struct sam_scmi_rd *rd;
+	size_t rd_count;
 };
 
 static const struct channel_resources scmi_channel[] = {
@@ -26,6 +54,8 @@ static const struct channel_resources scmi_channel[] = {
 			.shm_addr = { .pa = CFG_SCMI_SHMEM_START },
 			.shm_size = SMT_BUF_SLOT_SIZE,
 		},
+		.rd = sam_scmi_reset_domain,
+		.rd_count = ARRAY_SIZE(sam_scmi_reset_domain),
 	},
 };
 
@@ -63,6 +93,7 @@ const char *plat_scmi_sub_vendor_name(void)
 /* Currently supporting only SCMI Base protocol */
 static const uint8_t plat_protocol_list[] = {
 	SCMI_PROTOCOL_ID_CLOCK,
+	SCMI_PROTOCOL_ID_RESET_DOMAIN,
 	0 /* Null termination */
 };
 
@@ -80,10 +111,11 @@ struct sam_pmc_clk {
 	unsigned int scmi_id;
 	unsigned int pmc_type;
 	unsigned int pmc_id;
+	struct clk_range output_range;
 };
 
 #ifdef CFG_SAMA7G5
-static const struct sam_pmc_clk pmc_clks[] = {
+static struct sam_pmc_clk pmc_clks[] = {
 	{
 		.scmi_id = AT91_SCMI_CLK_CORE_MCK,
 		.pmc_type = PMC_TYPE_CORE,
@@ -382,6 +414,16 @@ static const struct sam_pmc_clk pmc_clks[] = {
 		.pmc_id = ID_PDMC1
 	},
 	{
+		.scmi_id = AT91_SCMI_CLK_GCK_PDMC0_GCLK,
+		.pmc_type = PMC_TYPE_GCK,
+		.pmc_id = ID_PDMC0
+	},
+	{
+		.scmi_id = AT91_SCMI_CLK_GCK_PDMC1_GCLK,
+		.pmc_type = PMC_TYPE_GCK,
+		.pmc_id = ID_PDMC1
+	},
+	{
 		.scmi_id = AT91_SCMI_CLK_PERIPH_SECURAM_CLK,
 		.pmc_type = PMC_TYPE_PERIPHERAL,
 		.pmc_id = ID_SECURAM
@@ -583,7 +625,7 @@ static const struct sam_pmc_clk pmc_clks[] = {
 	},
 };
 #else
-static const struct sam_pmc_clk pmc_clks[] = {
+static struct sam_pmc_clk pmc_clks[] = {
 	{
 		.scmi_id = AT91_SCMI_CLK_CORE_MCK,
 		.pmc_type = PMC_TYPE_CORE,
@@ -1038,12 +1080,99 @@ static TEE_Result sam_init_scmi_clk(void)
 	return TEE_SUCCESS;
 }
 
+static struct sam_scmi_rd *find_rd(unsigned int channel_id,
+				   unsigned int scmi_id)
+{
+	const struct channel_resources *resource = find_resource(channel_id);
+
+	if (resource && scmi_id < resource->rd_count)
+		return &resource->rd[scmi_id];
+
+	return NULL;
+}
+
+int32_t plat_scmi_rd_set_state(unsigned int channel_id, unsigned int scmi_id,
+			       bool assert_not_deassert)
+{
+	const struct sam_scmi_rd *rd = find_rd(channel_id, scmi_id);
+	TEE_Result res = TEE_ERROR_GENERIC;
+
+	if (!rd)
+		return SCMI_NOT_FOUND;
+
+	if (!rd->rstctrl)
+		return SCMI_DENIED;
+
+	if (assert_not_deassert) {
+		FMSG("SCMI reset %u set", scmi_id);
+		res = rstctrl_assert(rd->rstctrl);
+	} else {
+		FMSG("SCMI reset %u release", scmi_id);
+		res = rstctrl_deassert(rd->rstctrl);
+	}
+
+	if (res)
+		return SCMI_HARDWARE_ERROR;
+
+	return SCMI_SUCCESS;
+}
+
+size_t plat_scmi_rd_count(unsigned int channel_id)
+{
+	const struct channel_resources *resource = find_resource(channel_id);
+
+	if (!resource)
+		return 0;
+
+	return resource->rd_count;
+}
+
+void sam_set_clock_range(unsigned int pmc_type, unsigned int pmc_id,
+			 const struct clk_range *range)
+{
+	struct sam_pmc_clk *p = NULL;
+
+	for (p = pmc_clks; p < pmc_clks + ARRAY_SIZE(pmc_clks); p++) {
+		if (pmc_type == p->pmc_type && pmc_id == p->pmc_id) {
+			p->output_range.min = range->min;
+			p->output_range.max = range->max;
+			return;
+		}
+	}
+}
+
+int32_t plat_scmi_clock_rates_by_step(unsigned int channel_id,
+				      unsigned int scmi_id,
+				      unsigned long *steps)
+{
+	const struct sam_pmc_clk *p = NULL;
+	int32_t res = SCMI_NOT_SUPPORTED;
+
+	if (channel_id)
+		return res;
+
+	for (p = pmc_clks; p < pmc_clks + ARRAY_SIZE(pmc_clks); p++) {
+		if (scmi_id == p->scmi_id) {
+			if (p->output_range.max) {
+				steps[0] = p->output_range.min;
+				steps[1] = p->output_range.max;
+				steps[2] = 1;
+				res = SCMI_SUCCESS;
+			}
+			break;
+		}
+	}
+
+	return res;
+}
+
 /*
  * Initialize platform SCMI resources
  */
 static TEE_Result sam_init_scmi_server(void)
 {
 	size_t i = 0;
+	size_t j = 0;
 
 	for (i = 0; i < ARRAY_SIZE(scmi_channel); i++) {
 		const struct channel_resources *res = scmi_channel + i;
@@ -1055,6 +1184,18 @@ static TEE_Result sam_init_scmi_server(void)
 		assert(chan->shm_addr.va);
 
 		scmi_smt_init_agent_channel(chan);
+
+		for (j = 0; j < res->rd_count; j++) {
+			struct sam_scmi_rd *rd = &res->rd[j];
+			struct rstctrl *rstctrl = NULL;
+
+			rstctrl = sam_get_rstctrl(rd->reset_id);
+			assert(rstctrl);
+			if (rstctrl_get_exclusive(rstctrl))
+				continue;
+
+			rd->rstctrl = rstctrl;
+		}
 	}
 
 	return sam_init_scmi_clk();

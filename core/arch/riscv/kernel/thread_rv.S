@@ -18,7 +18,11 @@
 
 .macro get_thread_ctx res, tmp0
 	lw	\tmp0, THREAD_CORE_LOCAL_CURR_THREAD(tp)
+.option push
+.option norelax
 	la	\res, threads
+.option pop
+	LDR	\res, 0(\res)
 1:
 	beqz	\tmp0, 2f
 	addi	\res, \res, THREAD_CTX_SIZE
@@ -34,7 +38,7 @@
 
 /* size_t __get_core_pos(void); */
 FUNC __get_core_pos , : , .identity_map
-	lw	a0, THREAD_CORE_LOCAL_HART_ID(tp)
+	lw	a0, THREAD_CORE_LOCAL_HART_INDEX(tp)
 	ret
 END_FUNC __get_core_pos
 

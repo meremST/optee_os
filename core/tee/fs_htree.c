@@ -4,6 +4,7 @@
  */
 
 #include <assert.h>
+#include <config.h>
 #include <crypto/crypto.h>
 #include <initcall.h>
 #include <kernel/tee_common_otp.h>
@@ -453,7 +454,17 @@ static TEE_Result authenc_init(void **ctx_ret, TEE_OperationMode mode,
 		iv = ni->iv;
 	} else {
 		iv = ht->head.iv;
-		aad_len += TEE_FS_HTREE_HASH_SIZE + sizeof(ht->head.counter);
+		aad_len += sizeof(ht->head.counter);
+
+		/*
+		 * With CFG_REE_FS_HTREE_HASH_SIZE_COMPAT, hash data passed
+		 * for AAD is truncated to TEE_FS_HTREE_FEK_SIZE bytes so
+		 * use the correct size aad_len computation.
+		 */
+		if (IS_ENABLED(CFG_REE_FS_HTREE_HASH_SIZE_COMPAT))
+			aad_len += TEE_FS_HTREE_FEK_SIZE;
+		else
+			aad_len += TEE_FS_HTREE_HASH_SIZE;
 	}
 
 	if (mode == TEE_MODE_ENCRYPT) {
@@ -473,8 +484,13 @@ static TEE_Result authenc_init(void **ctx_ret, TEE_OperationMode mode,
 		goto err_free;
 
 	if (!ni) {
+		size_t hash_size = TEE_FS_HTREE_HASH_SIZE;
+
+		if (IS_ENABLED(CFG_REE_FS_HTREE_HASH_SIZE_COMPAT))
+			hash_size = TEE_FS_HTREE_FEK_SIZE;
+
 		res = crypto_authenc_update_aad(ctx, mode, ht->root.node.hash,
-						TEE_FS_HTREE_FEK_SIZE);
+						hash_size);
 		if (res != TEE_SUCCESS)
 			goto err;
 

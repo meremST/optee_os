@@ -111,12 +111,8 @@ static TEE_Result check_update_version(const char *db_name,
 		goto out;
 
 	if (res == TEE_ERROR_ITEM_NOT_FOUND) {
-		res = ops->create(&pobj, false, NULL, 0, NULL, 0, NULL, NULL,
-				   0, &fh);
-		if (res != TEE_SUCCESS)
-			goto out;
-
-		res = ops->write(fh, 0, &db_hdr, NULL, sizeof(db_hdr));
+		res = ops->create(&pobj, false, NULL, 0, NULL, 0, &db_hdr, NULL,
+				   sizeof(db_hdr), &fh);
 		if (res != TEE_SUCCESS)
 			goto out;
 	} else {
@@ -726,7 +722,7 @@ static TEE_Result buf_ta_open(const TEE_UUID *uuid,
 		goto err;
 	}
 	handle->buf = phys_to_virt(tee_mm_get_smem(handle->mm),
-				   MEM_AREA_TA_RAM, handle->ta_size);
+				   MEM_AREA_SEC_RAM_OVERALL, handle->ta_size);
 	if (!handle->buf) {
 		res = TEE_ERROR_OUT_OF_MEMORY;
 		goto err;

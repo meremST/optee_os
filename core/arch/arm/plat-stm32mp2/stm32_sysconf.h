@@ -64,6 +64,9 @@ enum syscon_banks {
 #define A35SS_SSC_CHGCLKREQ_ARM_CHGCLKACK_MASK	BIT(1)
 #define A35SS_SSC_CHGCLKREQ_ARM_CHGCLKACK_SHIFT	U(1)
 
+#define A35SS_SSC_CHGCLKREQ_ARM_DIVSEL		BIT(16)
+#define A35SS_SSC_CHGCLKREQ_ARM_DIVSELACK	BIT(17)
+
 /*
  * A35SSC A35SS_SSC_PLL_FREQ1 register
  */
@@ -117,5 +120,12 @@ uint32_t stm32mp_syscfg_read(uint32_t id);
  * @status: True to enable safe reset, false to disable safe reset
  */
 void stm32mp25_syscfg_set_safe_reset(bool status);
+
+/*
+ * Manage OSPI address mapping
+ * @mm1_size: Size of memory addressed by the OSPI1 peripheral
+ * @mm2_size: Size of memory addressed by the OSPI2 peripheral
+ */
+void stm32mp25_syscfg_set_amcr(size_t mm1_size, size_t mm2_size);
 
 #endif /*__STM32_SYSCONF_H__*/

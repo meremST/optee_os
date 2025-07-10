@@ -19,7 +19,10 @@
 # Cross-compiler prefix and suffix
 ifeq ($(ARCH),arm)
 CROSS_COMPILE ?= arm-linux-gnueabihf-
+# Don't cross-compile if building on aarch64 natively
+ifneq ($(shell uname -m),aarch64)
 CROSS_COMPILE64 ?= aarch64-linux-gnu-
+endif
 endif
 ifeq ($(ARCH),riscv)
 CROSS_COMPILE ?= riscv-linux-gnu-
@@ -127,7 +130,7 @@ CFG_OS_REV_REPORTS_GIT_SHA1 ?= y
 # with limited depth not including any tag, so there is really no guarantee
 # that TEE_IMPL_VERSION contains the major and minor revision numbers.
 CFG_OPTEE_REVISION_MAJOR ?= 4
-CFG_OPTEE_REVISION_MINOR ?= 4
+CFG_OPTEE_REVISION_MINOR ?= 6
 CFG_OPTEE_REVISION_EXTRA ?=
 
 # Trusted OS implementation version
@@ -148,6 +151,12 @@ CFG_TEE_FW_MANUFACTURER ?= FW_MAN_UNDEF
 # This is the default FS when enabled (i.e., the one used when
 # TEE_STORAGE_PRIVATE is passed to the trusted storage API)
 CFG_REE_FS ?= y
+
+# CFG_REE_FS_HTREE_HASH_SIZE_COMPAT, when enabled, supports the legacy
+# REE FS hash tree tagging implementation that uses a truncated hash.
+# Be warned that disabling this config could break accesses to existing
+# REE FS content.
+CFG_REE_FS_HTREE_HASH_SIZE_COMPAT ?= y
 
 # RPMB file system support
 CFG_RPMB_FS ?= n
@@ -244,6 +253,15 @@ TA_PUBLIC_KEY ?= $(TA_SIGN_KEY)
 # Include lib/libutils/isoc in the build? Most platforms need this, but some
 # may not because they obtain the isoc functions from elsewhere
 CFG_LIBUTILS_WITH_ISOC ?= y
+
+# Include lib/libutils/compiler-rt in the build. Most platforms need this.
+# Provides some functions called "compiler builtins", which the compiler
+# may invoke to perform low-level operations such as long long division
+# etc. Such functions typically come with compiler runtime libraires (GCC
+# has libgcc, Clang has compiler-rt). OP-TEE often can't use them because
+# they may be Linux-specific or bring unwanted dependencies. Therefore,
+# this imports and builds only what's needed.
+CFG_LIBUTILS_WITH_COMPILER_RT ?= y
 
 # Enables floating point support for user TAs
 # ARM32: EABI defines both a soft-float ABI and a hard-float ABI,
@@ -449,6 +467,7 @@ CFG_CORE_BGET_BESTFIT ?= $(call cfg-one-enabled, CFG_WITH_PAGER CFG_LOCKDEP)
 # Enable support for detected undefined behavior in C
 # Uses a lot of memory, can't be enabled by default
 CFG_CORE_SANITIZE_UNDEFINED ?= n
+CFG_TA_SANITIZE_UNDEFINED ?= n
 
 # Enable Kernel Address sanitizer, has a huge performance impact, uses a
 # lot of memory and need platform specific adaptations, can't be enabled by
@@ -513,11 +532,6 @@ endif
 # has a stable release.
 # This feature requires the support of Device Tree.
 CFG_TRANSFER_LIST ?= n
-ifeq ($(CFG_TRANSFER_LIST),y)
-$(call force,CFG_DT,y)
-$(call force,CFG_EXTERNAL_DT,y)
-$(call force,CFG_MAP_EXT_DT_SECURE,y)
-endif
 
 # Maximum size of the Device Tree Blob, has to be large enough to allow
 # editing of the supplied DTB.
@@ -557,6 +571,9 @@ CFG_ENABLE_EMBEDDED_TESTS ?= n
 
 # Enable core self tests and related pseudo TAs
 CFG_TEE_CORE_EMBED_INTERNAL_TESTS ?= $(CFG_ENABLE_EMBEDDED_TESTS)
+# Embed transfer list support self test when enabled
+CFG_TRANSFER_LIST_TEST ?= $(call cfg-all-enabled,CFG_TRANSFER_LIST \
+			    CFG_TEE_CORE_EMBED_INTERNAL_TESTS)
 
 # Compiles bget_main_test() to be called from a test TA
 CFG_TA_BGET_TEST ?= $(CFG_ENABLE_EMBEDDED_TESTS)
@@ -790,6 +807,7 @@ CFG_CORE_TPM_EVENT_LOG ?= n
 # CFG_SCMI_MSG_RESET_DOMAIN embeds SCMI reset domain protocol support.
 # CFG_SCMI_MSG_SMT embeds a SMT header in shared device memory buffers
 # CFG_SCMI_MSG_VOLTAGE_DOMAIN embeds SCMI voltage domain protocol support.
+# CFG_SCMI_MSG_PERF_DOMAIN embeds SCMI performance domain management protocol
 # CFG_SCMI_MSG_SMT_FASTCALL_ENTRY embeds fastcall SMC entry with SMT memory
 # CFG_SCMI_MSG_SMT_INTERRUPT_ENTRY embeds interrupt entry with SMT memory
 # CFG_SCMI_MSG_SMT_THREAD_ENTRY embeds threaded entry with SMT memory
@@ -805,6 +823,7 @@ CFG_SCMI_MSG_SMT_INTERRUPT_ENTRY ?= n
 CFG_SCMI_MSG_SMT_THREAD_ENTRY ?= n
 CFG_SCMI_MSG_THREAD_ENTRY ?= n
 CFG_SCMI_MSG_VOLTAGE_DOMAIN ?= n
+CFG_SCMI_MSG_PERF_DOMAIN ?= n
 $(eval $(call cfg-depends-all,CFG_SCMI_MSG_SMT_FASTCALL_ENTRY,CFG_SCMI_MSG_SMT))
 $(eval $(call cfg-depends-all,CFG_SCMI_MSG_SMT_INTERRUPT_ENTRY,CFG_SCMI_MSG_SMT))
 $(eval $(call cfg-depends-one,CFG_SCMI_MSG_SMT_THREAD_ENTRY,CFG_SCMI_MSG_SMT CFG_SCMI_MSG_SHM_MSG))
@@ -833,6 +852,11 @@ $(error CFG_SCMI_SCPFW=y requires CFG_SCP_FIRMWARE configuration)
 endif
 endif #CFG_SCMI_SCPFW
 
+# CFG_SCMI_SCPFW_FROM_DT, when enabled, calls scpfw_configure() function
+# in SCP-firmware that will retrieve resources in "scmi" fdt node.
+CFG_SCMI_SCPFW_FROM_DT ?= n
+$(eval $(call cfg-depends-all,CFG_SCMI_SCPFW_FROM_DT,CFG_SCMI_SCPFW CFG_EMBED_DTB))
+
 ifeq ($(CFG_SCMI_MSG_DRIVERS)-$(CFG_SCMI_SCPFW),y-y)
 $(error CFG_SCMI_MSG_DRIVERS=y and CFG_SCMI_SCPFW=y are mutually exclusive)
 endif
@@ -852,6 +876,7 @@ endif
 
 ifneq ($(CFG_STMM_PATH),)
 $(call force,CFG_WITH_STMM_SP,y)
+$(call force,CFG_EFILIB,y)
 else
 CFG_WITH_STMM_SP ?= n
 endif
@@ -1038,8 +1063,14 @@ CFG_CORE_ASYNC_NOTIF ?= n
 $(call force,_CFG_CORE_ASYNC_NOTIF_DEFAULT_IMPL,$(CFG_CORE_ASYNC_NOTIF))
 endif
 
+ifeq ($(CFG_CORE_SEL2_SPMC),y)
+# Callout by default disabled for SPMC at S-EL2 since Hafnium may crash,
+# but allow it to be overridden for testing
+CFG_CALLOUT ?= n
+else
 # Enable callout service
 CFG_CALLOUT ?= $(CFG_CORE_ASYNC_NOTIF)
+endif
 
 # Enable notification based test watchdog
 CFG_NOTIF_TEST_WD ?= $(call cfg-all-enabled,CFG_ENABLE_EMBEDDED_TESTS \
@@ -1262,4 +1293,22 @@ CFG_CORE_UNSAFE_MODEXP ?= n
 # CFG_TA_MBEDTLS_UNSAFE_MODEXP, similar to CFG_CORE_UNSAFE_MODEXP,
 # when enabled, makes MBedTLS library for TAs use 'unsafe' modular
 # exponentiation algorithm.
-CFG_TA_MEBDTLS_UNSAFE_MODEXP ?= n
+CFG_TA_MBEDTLS_UNSAFE_MODEXP ?= n
+
+# CFG_DYN_CONFIG, when enabled, use dynamic memory allocation for translation
+# tables and stacks. Not supported with pager.
+ifeq ($(CFG_WITH_PAGER),y)
+$(call force,CFG_DYN_CONFIG,n,conflicts with CFG_WITH_PAGER)
+else
+CFG_DYN_CONFIG ?= y
+endif
+
+# CFG_EXTERNAL_ABORT_PLAT_HANDLER is used to implement platform-specific
+# handling of external abort implementing the plat_external_abort_handler()
+# function.
+CFG_EXTERNAL_ABORT_PLAT_HANDLER ?= n
+
+# CFG_TA_LIBGCC, when enabled, links user mode TAs with libgcc. Linking
+# TAs with libgcc is deprecated, but keep this flag while sorting out the
+# out remaining issues with supporting C++.
+CFG_TA_LIBGCC ?= y

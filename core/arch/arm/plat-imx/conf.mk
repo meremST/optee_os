@@ -241,7 +241,7 @@ $(call force,CFG_TZC380,n)
 $(call force,CFG_CRYPTO_DRIVER,n)
 $(call force,CFG_NXP_CAAM,n)
 CFG_IMX_MU ?= y
-CFG_IMX_ELE ?= n
+CFG_IMX_ELE ?= y
 else ifneq (,$(filter $(PLATFORM_FLAVOR),$(mx95-flavorlist)))
 $(call force,CFG_MX95,y)
 $(call force,CFG_ARM64_core,y)
@@ -263,7 +263,7 @@ $(call force,CFG_IMX_OCOTP,n)
 $(call force,CFG_TZC380,n)
 $(call force,CFG_NXP_CAAM,n)
 CFG_IMX_MU ?= y
-CFG_IMX_ELE ?= n
+CFG_IMX_ELE ?= y
 else
 $(error Unsupported PLATFORM_FLAVOR "$(PLATFORM_FLAVOR)")
 endif
@@ -561,6 +561,7 @@ CFG_MMAP_REGIONS ?= 24
 # SE05X and OCOTP both implement tee_otp_get_die_id()
 ifeq ($(CFG_NXP_SE05X),y)
 $(call force,CFG_IMX_OCOTP,n)
+$(call force,CFG_CORE_HUK_SUBKEY_COMPAT_USE_OTP_DIE_ID,n)
 endif
 CFG_IMX_OCOTP ?= y
 CFG_IMX_DIGPROG ?= y

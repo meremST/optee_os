@@ -41,9 +41,13 @@ cppflags$(sm)	+= -I$(out-dir)/core/include
 cppflags$(sm)	+= $(core-platform-cppflags)
 cflags$(sm)	+= $(core-platform-cflags)
 
+ifeq ($(_CFG_CORE_STACK_PROTECTOR),y)
 core-stackp-cflags-$(CFG_CORE_STACK_PROTECTOR) := -fstack-protector
 core-stackp-cflags-$(CFG_CORE_STACK_PROTECTOR_STRONG) := -fstack-protector-strong
 core-stackp-cflags-$(CFG_CORE_STACK_PROTECTOR_ALL) := -fstack-protector-all
+else
+core-stackp-cflags-y := -fno-stack-protector
+endif
 cflags$(sm)	+= $(core-stackp-cflags-y)
 
 ifeq ($(CFG_CORE_SANITIZE_UNDEFINED),y)
@@ -58,8 +62,11 @@ $(error error: CFG_CORE_SANITIZE_KADDRESS not supported with Clang)
 endif
 cflags_kasan	+= -fsanitize=kernel-address \
 		   -fasan-shadow-offset=$(CFG_ASAN_SHADOW_OFFSET)\
-		   --param asan-stack=1 --param asan-globals=1 \
+		   --param asan-globals=1 \
 		   --param asan-instrumentation-with-call-threshold=0
+ifneq ($(CFG_DYN_CONFIG),y)
+cflags_kasan	+= --param asan-stack=1
+endif
 cflags$(sm)	+= $(cflags_kasan)
 endif
 ifeq ($(CFG_CORE_DEBUG_CHECK_STACKS),y)
@@ -161,6 +168,12 @@ include mk/lib.mk
 ifeq ($(CFG_ZLIB),y)
 libname = zlib
 libdir = core/lib/zlib
+include mk/lib.mk
+endif
+
+ifeq ($(CFG_EFILIB),y)
+libname = efi
+libdir = core/lib/libefi
 include mk/lib.mk
 endif
 

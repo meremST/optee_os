@@ -34,6 +34,8 @@
 
 #define BOUNCE_BUFFER_SIZE		4096
 
+#define UNDEFINED_BOOT_ORDER_VALUE	UINT32_MAX
+
 #define SP_MANIFEST_ATTR_READ		BIT(0)
 #define SP_MANIFEST_ATTR_WRITE		BIT(1)
 #define SP_MANIFEST_ATTR_EXEC		BIT(2)
@@ -127,11 +129,18 @@ struct sp_session *sp_get_session(uint32_t session_id)
 }
 
 TEE_Result sp_partition_info_get(uint32_t ffa_vers, void *buf, size_t buf_size,
-				 const TEE_UUID *ffa_uuid, size_t *elem_count,
-				 bool count_only)
+				 const uint32_t ffa_uuid_words[4],
+				 size_t *elem_count, bool count_only)
 {
 	TEE_Result res = TEE_SUCCESS;
 	struct sp_session *s = NULL;
+	TEE_UUID uuid = { };
+	TEE_UUID *ffa_uuid = NULL;
+
+	if (ffa_uuid_words) {
+		tee_uuid_from_octets(&uuid, (void *)ffa_uuid_words);
+		ffa_uuid = &uuid;
+	}
 
 	TAILQ_FOREACH(s, &open_sp_sessions, link) {
 		if (ffa_uuid &&
@@ -185,7 +194,7 @@ static bool endpoint_id_is_valid(uint32_t id)
 	 * These IDs are assigned at the SPMC init so already have valid values
 	 * by the time this function gets first called
 	 */
-	return id != spmd_id && id != spmc_id && id != optee_endpoint_id &&
+	return !spmc_is_reserved_id(id) && !spmc_find_lsp_by_sp_id(id) &&
 	       id >= FFA_SWD_ID_MIN && id <= FFA_SWD_ID_MAX;
 }
 
@@ -729,7 +738,7 @@ static void fill_boot_info_1_0(vaddr_t buf, const void *fdt)
 	info->nvp[0].size = fdt_totalsize(fdt);
 }
 
-static void fill_boot_info_1_1(vaddr_t buf, const void *fdt)
+static void fill_boot_info_1_1(vaddr_t buf, const void *fdt, uint32_t vers)
 {
 	size_t desc_offs = ROUNDUP(sizeof(struct ffa_boot_info_header_1_1), 8);
 	struct ffa_boot_info_header_1_1 *header =
@@ -738,7 +747,7 @@ static void fill_boot_info_1_1(vaddr_t buf, const void *fdt)
 		(struct ffa_boot_info_1_1 *)(buf + desc_offs);
 
 	header->signature = FFA_BOOT_INFO_SIGNATURE;
-	header->version = FFA_BOOT_INFO_VERSION;
+	header->version = vers;
 	header->blob_size = desc_offs + sizeof(struct ffa_boot_info_1_1);
 	header->desc_size = sizeof(struct ffa_boot_info_1_1);
 	header->desc_count = 1;
@@ -755,7 +764,7 @@ static void fill_boot_info_1_1(vaddr_t buf, const void *fdt)
 }
 
 static TEE_Result create_and_map_boot_info(struct sp_ctx *ctx, const void *fdt,
-					   struct thread_smc_args *args,
+					   struct thread_smc_1_2_regs *args,
 					   vaddr_t *va, size_t *mapped_size,
 					   uint32_t sp_ffa_version)
 {
@@ -785,7 +794,8 @@ static TEE_Result create_and_map_boot_info(struct sp_ctx *ctx, const void *fdt,
 		fill_boot_info_1_0(*va, fdt);
 		break;
 	case MAKE_FFA_VERSION(1, 1):
-		fill_boot_info_1_1(*va, fdt);
+	case MAKE_FFA_VERSION(1, 2):
+		fill_boot_info_1_1(*va, fdt, sp_ffa_version);
 		break;
 	default:
 		EMSG("Unknown FF-A version: %#"PRIx32, sp_ffa_version);
@@ -1557,31 +1567,52 @@ static TEE_Result read_vm_availability_msg(const void *fdt,
 	return TEE_SUCCESS;
 }
 
+static TEE_Result get_boot_order(const void *fdt, uint32_t *boot_order)
+{
+	TEE_Result res = TEE_SUCCESS;
+
+	res = sp_dt_get_u32(fdt, 0, "boot-order", boot_order);
+
+	if (res == TEE_SUCCESS) {
+		if (*boot_order > UINT16_MAX) {
+			EMSG("Value of boot-order property (%"PRIu32") is out of range",
+			     *boot_order);
+			res = TEE_ERROR_BAD_FORMAT;
+		}
+	} else if (res == TEE_ERROR_BAD_FORMAT) {
+		uint16_t boot_order_u16 = 0;
+
+		res = sp_dt_get_u16(fdt, 0, "boot-order", &boot_order_u16);
+		if (res == TEE_SUCCESS)
+			*boot_order = boot_order_u16;
+	}
+
+	if (res == TEE_ERROR_ITEM_NOT_FOUND)
+		*boot_order = UNDEFINED_BOOT_ORDER_VALUE;
+	else if (res != TEE_SUCCESS)
+		EMSG("Failed reading boot-order property err: %#"PRIx32, res);
+
+	return res;
+}
+
 static TEE_Result sp_init_uuid(const TEE_UUID *bin_uuid, const void * const fdt)
 {
 	TEE_Result res = TEE_SUCCESS;
 	struct sp_session *sess = NULL;
 	TEE_UUID ffa_uuid = {};
-	uint16_t boot_order = 0;
-	uint32_t boot_order_arg = 0;
+	uint32_t boot_order = 0;
 
 	res = fdt_get_uuid(fdt, &ffa_uuid);
 	if (res)
 		return res;
 
-	res = sp_dt_get_u16(fdt, 0, "boot-order", &boot_order);
-	if (res == TEE_SUCCESS) {
-		boot_order_arg = boot_order;
-	} else if (res == TEE_ERROR_ITEM_NOT_FOUND) {
-		boot_order_arg = UINT32_MAX;
-	} else {
-		EMSG("Failed reading boot-order property err:%#"PRIx32, res);
+	res = get_boot_order(fdt, &boot_order);
+	if (res)
 		return res;
-	}
 
 	res = sp_open_session(&sess,
 			      &open_sp_sessions,
-			      &ffa_uuid, bin_uuid, boot_order_arg, fdt);
+			      &ffa_uuid, bin_uuid, boot_order, fdt);
 	if (res)
 		return res;
 
@@ -1618,7 +1649,7 @@ static TEE_Result sp_init_uuid(const TEE_UUID *bin_uuid, const void * const fdt)
 static TEE_Result sp_first_run(struct sp_session *sess)
 {
 	TEE_Result res = TEE_SUCCESS;
-	struct thread_smc_args args = { };
+	struct thread_smc_1_2_regs args = { };
 	struct sp_ctx *ctx = NULL;
 	vaddr_t boot_info_va = 0;
 	size_t boot_info_size = 0;
@@ -1688,7 +1719,7 @@ out:
 	return res;
 }
 
-TEE_Result sp_enter(struct thread_smc_args *args, struct sp_session *sp)
+TEE_Result sp_enter(struct thread_smc_1_2_regs *args, struct sp_session *sp)
 {
 	TEE_Result res = TEE_SUCCESS;
 	struct sp_ctx *ctx = to_sp_ctx(sp->ts_sess.ctx);
@@ -1871,7 +1902,7 @@ static const struct ts_ops sp_ops = {
 
 static TEE_Result process_sp_pkg(uint64_t sp_pkg_pa, TEE_UUID *sp_uuid)
 {
-	enum teecore_memtypes mtype = MEM_AREA_TA_RAM;
+	enum teecore_memtypes mtype = MEM_AREA_SEC_RAM_OVERALL;
 	struct sp_pkg_header *sp_pkg_hdr = NULL;
 	struct fip_sp *sp = NULL;
 	uint64_t sp_fdt_end = 0;
@@ -2055,8 +2086,8 @@ static TEE_Result sp_init_all(void)
 	 * and warn in case there is a non-unique value.
 	 */
 	TAILQ_FOREACH(s, &open_sp_sessions, link) {
-		/* User specified boot-order values are uint16 */
-		if (s->boot_order > UINT16_MAX)
+		/* Avoid warnings if multiple SP have undefined boot-order. */
+		if (s->boot_order == UNDEFINED_BOOT_ORDER_VALUE)
 			break;
 
 		if (prev_sp && prev_sp->boot_order == s->boot_order)

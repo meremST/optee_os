@@ -24,6 +24,8 @@ DEFINES
 	DEFINE(THREAD_CORE_LOCAL_SIZE, sizeof(struct thread_core_local));
 	DEFINE(THREAD_CORE_LOCAL_HART_ID,
 	       offsetof(struct thread_core_local, hart_id));
+	DEFINE(THREAD_CORE_LOCAL_HART_INDEX,
+	       offsetof(struct thread_core_local, hart_index));
 	DEFINE(THREAD_CORE_LOCAL_TMP_STACK_VA_END,
 	       offsetof(struct thread_core_local, tmp_stack_va_end));
 	DEFINE(THREAD_CORE_LOCAL_CURR_THREAD,
@@ -36,6 +38,7 @@ DEFINES
 	DEFINE(THREAD_CORE_LOCAL_X1, offsetof(struct thread_core_local, x[1]));
 
 	DEFINE(STACK_TMP_GUARD, STACK_CANARY_SIZE / 2 + STACK_TMP_OFFS);
+	DEFINE(__STACK_CANARY_SIZE, STACK_CANARY_SIZE);
 
 	/* struct thread_ctx_regs */
 	DEFINE(THREAD_CTX_REG_STATUS, offsetof(struct thread_ctx_regs, status));
@@ -100,6 +103,8 @@ DEFINES
 	DEFINE(CORE_MMU_CONFIG_SATP,
 	       offsetof(struct core_mmu_config, satp[0]));
 	DEFINE(CORE_MMU_CONFIG_SATP_SIZE, sizeof(unsigned long));
+	DEFINE(CORE_MMU_CONFIG_MAP_OFFSET,
+	       offsetof(struct core_mmu_config, map_offset));
 
 	/* struct thread_abi_args */
 	DEFINE(THREAD_ABI_ARGS_A0, offsetof(struct thread_abi_args, a0));

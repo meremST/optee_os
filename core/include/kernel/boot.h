@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 /*
- * Copyright (c) 2015-2020, Linaro Limited
+ * Copyright (c) 2015-2025, Linaro Limited
  * Copyright (c) 2021-2023, Arm Limited
  */
 #ifndef __KERNEL_BOOT_H
@@ -45,6 +45,7 @@ extern const struct core_mmu_config boot_mmu_config;
 
 void boot_init_primary_early(void);
 void boot_init_primary_late(unsigned long fdt, unsigned long manifest);
+void boot_init_primary_runtime(void);
 void boot_init_primary_final(void);
 void boot_init_memtag(void);
 void boot_clear_memtag(void);
@@ -61,6 +62,7 @@ void boot_init_secondary(unsigned long nsec_entry);
 #endif
 
 void boot_primary_init_intc(void);
+void boot_primary_init_core_ids(void);
 void boot_secondary_init_intc(void);
 
 void init_sec_mon(unsigned long nsec_entry);
@@ -104,5 +106,23 @@ unsigned long get_aslr_seed(void);
 void discover_nsec_memory(void);
 /* Add reserved memory for static shared memory in the device-tree */
 int mark_static_shm_as_reserved(struct dt_descriptor *dt);
+
+/*
+ * Stack-like memory allocations during boot before a heap has been
+ * configured. boot_mem_relocate() performs relocation of the boot memory
+ * and address cells registered with boot_mem_add_reloc() during virtual
+ * memory initialization. Unused memory is unmapped and released to pool of
+ * free physical memory once MMU is initialized.
+ */
+void boot_mem_init(vaddr_t start, vaddr_t end, vaddr_t orig_end);
+void boot_mem_init_asan(void);
+void boot_mem_foreach_padding(bool (*func)(vaddr_t va, size_t len, void *ptr),
+			      void *ptr);
+void boot_mem_add_reloc(void *ptr);
+void boot_mem_relocate(size_t offs);
+void *boot_mem_alloc(size_t len, size_t align);
+void *boot_mem_alloc_tmp(size_t len, size_t align);
+vaddr_t boot_mem_release_unused(void);
+void boot_mem_release_tmp_alloc(void);
 
 #endif /* __KERNEL_BOOT_H */

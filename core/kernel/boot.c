@@ -4,6 +4,7 @@
  * Copyright (c) 2023, Arm Limited
  */
 
+#include <crypto/crypto.h>
 #include <kernel/boot.h>
 #include <kernel/dt.h>
 #include <libfdt.h>
@@ -141,7 +142,18 @@ void discover_nsec_memory(void)
 			return;
 		}
 
-		DMSG("No non-secure memory found in FDT");
+		DMSG("No non-secure memory found in external DT");
+	}
+
+	fdt = get_embedded_dt();
+	if (fdt) {
+		mem = get_nsec_memory(fdt, &nelems);
+		if (mem) {
+			core_mmu_set_discovered_nsec_ddr(mem, nelems);
+			return;
+		}
+
+		DMSG("No non-secure memory found in embedded DT");
 	}
 
 	mem_begin = phys_ddr_overall_begin;
@@ -193,3 +205,33 @@ int mark_static_shm_as_reserved(struct dt_descriptor *dt)
 	return -1;
 }
 #endif /*CFG_CORE_RESERVED_SHM*/
+
+#if defined(_CFG_CORE_STACK_PROTECTOR) || defined(CFG_WITH_STACK_CANARIES)
+/* Generate random stack canary value on boot up */
+__weak void plat_get_random_stack_canaries(void *buf, size_t ncan, size_t size)
+{
+	TEE_Result ret = TEE_ERROR_GENERIC;
+	size_t i = 0;
+
+	assert(buf && ncan && size);
+
+	/*
+	 * With virtualization the RNG is not initialized in Nexus core.
+	 * Need to override with platform specific implementation.
+	 */
+	if (IS_ENABLED(CFG_NS_VIRTUALIZATION)) {
+		IMSG("WARNING: Using fixed value for stack canary");
+		memset(buf, 0xab, ncan * size);
+		goto out;
+	}
+
+	ret = crypto_rng_read(buf, ncan * size);
+	if (ret != TEE_SUCCESS)
+		panic("Failed to generate random stack canary");
+
+out:
+	/* Leave null byte in canary to prevent string base exploit */
+	for (i = 0; i < ncan; i++)
+		*((uint8_t *)buf + size * i) = 0;
+}
+#endif /* _CFG_CORE_STACK_PROTECTOR || CFG_WITH_STACK_CANARIES */

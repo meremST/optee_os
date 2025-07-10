@@ -18,6 +18,7 @@
 		ldrh	w\tmp0, [\core_local, \
 				#THREAD_CORE_LOCAL_CURR_THREAD]
 		adr_l	x\res, threads
+		ldr     x\res, [x\res]
 		mov	x\tmp1, #THREAD_CTX_SIZE
 		madd	x\res, x\tmp0, x\tmp1, x\res
 	.endm
@@ -1153,6 +1154,15 @@ END_FUNC el0_sync_abort
 	write_apiakeylo	x2
 	isb
 #endif
+
+#ifdef CFG_CORE_FFA
+	/* x0 is still pointing to the current thread_ctx */
+	/* load curr_thread_ctx->tsd.rpc_target_info into w19 */
+	ldr	w19, [x0, #THREAD_CTX_TSD_RPC_TARGET_INFO]
+	/* load curr_thread_ctx->flags into w19 */
+	ldr	w20, [x0, #THREAD_CTX_FLAGS]
+#endif
+
 	/* load tmp_stack_va_end */
 	ldr	x1, [sp, #THREAD_CORE_LOCAL_TMP_STACK_VA_END]
 	/* Switch to SP_EL0 */
@@ -1193,6 +1203,10 @@ END_FUNC el0_sync_abort
 	 */
 
 	/* Passing thread index in w0 */
+#ifdef CFG_CORE_FFA
+	mov	w1, w19		/* rpc_target_info */
+	mov	w2, w20		/* flags */
+#endif
 	b	thread_foreign_intr_exit
 .endm
 

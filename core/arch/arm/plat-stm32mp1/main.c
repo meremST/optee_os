@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause
 /*
- * Copyright (c) 2017-2024, STMicroelectronics
+ * Copyright (c) 2017-2025, STMicroelectronics
  * Copyright (c) 2016-2018, Linaro Limited
  */
 
@@ -11,9 +11,7 @@
 #include <drivers/gic.h>
 #include <drivers/pinctrl.h>
 #include <drivers/stm32_bsec.h>
-#include <drivers/stm32_etzpc.h>
 #include <drivers/stm32_gpio.h>
-#include <drivers/stm32_iwdg.h>
 #include <drivers/stm32_uart.h>
 #include <drivers/stm32mp_dt_bindings.h>
 #ifdef CFG_STM32MP15
@@ -86,17 +84,16 @@ void plat_console_init(void)
 	/* Early console initialization before MMU setup */
 	struct uart {
 		paddr_t pa;
-		bool secure;
 	} uarts[] = {
 		[0] = { .pa = 0 },
-		[1] = { .pa = USART1_BASE, .secure = true, },
-		[2] = { .pa = USART2_BASE, .secure = false, },
-		[3] = { .pa = USART3_BASE, .secure = false, },
-		[4] = { .pa = UART4_BASE, .secure = false, },
-		[5] = { .pa = UART5_BASE, .secure = false, },
-		[6] = { .pa = USART6_BASE, .secure = false, },
-		[7] = { .pa = UART7_BASE, .secure = false, },
-		[8] = { .pa = UART8_BASE, .secure = false, },
+		[1] = { .pa = USART1_BASE },
+		[2] = { .pa = USART2_BASE },
+		[3] = { .pa = USART3_BASE },
+		[4] = { .pa = UART4_BASE },
+		[5] = { .pa = UART5_BASE },
+		[6] = { .pa = USART6_BASE },
+		[7] = { .pa = UART7_BASE },
+		[8] = { .pa = UART8_BASE },
 	};
 
 	COMPILE_TIME_ASSERT(ARRAY_SIZE(uarts) > CFG_STM32_EARLY_CONSOLE_UART);
@@ -107,7 +104,6 @@ void plat_console_init(void)
 	/* No clock yet bound to the UART console */
 	console_data.clock = NULL;
 
-	console_data.secure = uarts[CFG_STM32_EARLY_CONSOLE_UART].secure;
 	stm32_uart_init(&console_data, uarts[CFG_STM32_EARLY_CONSOLE_UART].pa);
 
 	register_serial_console(&console_data.chip);
@@ -144,7 +140,7 @@ static TEE_Result init_console_from_dt(void)
 	console_flush();
 	console_data = *pd;
 	register_serial_console(&console_data.chip);
-	IMSG("DTB enables console (%ssecure)", pd->secure ? "" : "non-");
+	IMSG("DTB enables console");
 	free(pd);
 
 	return TEE_SUCCESS;
@@ -152,6 +148,35 @@ static TEE_Result init_console_from_dt(void)
 
 /* Probe console from DT once clock inits (service init level) are completed */
 service_init_late(init_console_from_dt);
+
+static uintptr_t stm32_dbgmcu_base(void)
+{
+	static void *va;
+
+	if (!cpu_mmu_enabled())
+		return DBGMCU_BASE;
+
+	if (!va)
+		va = phys_to_virt(DBGMCU_BASE, MEM_AREA_IO_SEC, 1);
+
+	return (uintptr_t)va;
+}
+
+/* SoC device ID util, returns default ID if can't access DBGMCU */
+TEE_Result stm32mp1_dbgmcu_get_chip_dev_id(uint32_t *chip_dev_id)
+{
+	uint32_t id = STM32MP1_CHIP_ID;
+
+	assert(chip_dev_id);
+
+	if (stm32_bsec_read_debug_conf() & BSEC_DBGSWGEN)
+		id = io_read32(stm32_dbgmcu_base() + DBGMCU_IDC) &
+		     DBGMCU_IDC_DEV_ID_MASK;
+
+	*chip_dev_id = id;
+
+	return TEE_SUCCESS;
+}
 
 /*
  * GIC init, used also for primary/secondary boot core wake completion
@@ -488,46 +513,6 @@ static bool __maybe_unused bank_is_valid(unsigned int bank)
 	panic();
 }
 
-#ifdef CFG_STM32_IWDG
-TEE_Result stm32_get_iwdg_otp_config(paddr_t pbase,
-				     struct stm32_iwdg_otp_data *otp_data)
-{
-	unsigned int idx = 0;
-	uint32_t otp_id = 0;
-	size_t bit_len = 0;
-	uint8_t bit_offset = 0;
-	uint32_t otp_value = 0;
-
-	switch (pbase) {
-	case IWDG1_BASE:
-		idx = 0;
-		break;
-	case IWDG2_BASE:
-		idx = 1;
-		break;
-	default:
-		panic();
-	}
-
-	if (stm32_bsec_find_otp_in_nvmem_layout("hw2_otp", &otp_id, &bit_offset,
-						&bit_len) ||
-	    bit_len != 32 || bit_offset != 0)
-		panic();
-
-	if (stm32_bsec_read_otp(&otp_value, otp_id))
-		panic();
-
-	otp_data->hw_enabled = otp_value &
-			       BIT(idx + HW2_OTP_IWDG_HW_ENABLE_SHIFT);
-	otp_data->disable_on_stop = otp_value &
-				    BIT(idx + HW2_OTP_IWDG_FZ_STOP_SHIFT);
-	otp_data->disable_on_standby = otp_value &
-				       BIT(idx + HW2_OTP_IWDG_FZ_STANDBY_SHIFT);
-
-	return TEE_SUCCESS;
-}
-#endif /*CFG_STM32_IWDG*/
-
 #ifdef CFG_STM32_DEBUG_ACCESS
 static TEE_Result init_debug(void)
 {
@@ -622,3 +607,138 @@ bool stm32mp1_ram_intersect_pager_ram(paddr_t base, size_t size)
 					CFG_TZSRAM_SIZE);
 }
 #endif
+
+static TEE_Result get_chip_dev_id(uint32_t *dev_id)
+{
+#ifdef CFG_STM32MP13
+	*dev_id = stm32mp_syscfg_get_chip_dev_id();
+	return TEE_SUCCESS;
+#else /* assume CFG_STM32MP15 */
+	return stm32mp1_dbgmcu_get_chip_dev_id(dev_id);
+#endif
+}
+
+static TEE_Result get_part_number(uint32_t *part_nb)
+{
+	static uint32_t part_number;
+	uint32_t dev_id = 0;
+	uint32_t otp = 0;
+	size_t bit_len = 0;
+	TEE_Result res = TEE_ERROR_GENERIC;
+
+	assert(part_nb);
+
+	if (part_number) {
+		*part_nb = part_number;
+		return TEE_SUCCESS;
+	}
+
+	res = get_chip_dev_id(&dev_id);
+	if (res)
+		return res;
+
+	res = stm32_bsec_find_otp_in_nvmem_layout("part_number_otp",
+						  &otp, NULL, &bit_len);
+	if (res)
+		return res;
+
+	res = stm32_bsec_read_otp(&part_number, otp);
+	if (res)
+		return res;
+
+	assert(bit_len < 16);
+	part_number = (part_number & GENMASK_32(bit_len, 0)) |
+		      SHIFT_U32(dev_id, 16);
+
+	*part_nb = part_number;
+
+	return TEE_SUCCESS;
+}
+
+bool stm32mp_supports_cpu_opp(uint32_t opp_id)
+{
+	uint32_t part_number = 0;
+	uint32_t id = 0;
+
+	if (get_part_number(&part_number)) {
+		DMSG("Cannot get part number");
+		panic();
+	}
+
+	switch (part_number) {
+	case STM32MP135F_PART_NB:
+	case STM32MP135D_PART_NB:
+	case STM32MP133F_PART_NB:
+	case STM32MP133D_PART_NB:
+	case STM32MP131F_PART_NB:
+	case STM32MP131D_PART_NB:
+	case STM32MP157F_PART_NB:
+	case STM32MP157D_PART_NB:
+	case STM32MP153F_PART_NB:
+	case STM32MP153D_PART_NB:
+	case STM32MP151F_PART_NB:
+	case STM32MP151D_PART_NB:
+		id = BIT(1);
+		break;
+	default:
+		id = BIT(0);
+		break;
+	}
+
+	return opp_id & id;
+}
+
+bool stm32mp_supports_hw_cryp(void)
+{
+	uint32_t part_number = 0;
+
+	if (!IS_ENABLED(CFG_STM32_CRYP))
+		return false;
+
+	if (get_part_number(&part_number)) {
+		DMSG("Cannot get part number");
+		panic();
+	}
+
+	switch (part_number) {
+	case STM32MP135F_PART_NB:
+	case STM32MP135C_PART_NB:
+	case STM32MP133F_PART_NB:
+	case STM32MP133C_PART_NB:
+	case STM32MP131F_PART_NB:
+	case STM32MP131C_PART_NB:
+		return true;
+	case STM32MP157F_PART_NB:
+	case STM32MP157C_PART_NB:
+	case STM32MP153F_PART_NB:
+	case STM32MP153C_PART_NB:
+	case STM32MP151F_PART_NB:
+	case STM32MP151C_PART_NB:
+		return true;
+	default:
+		return false;
+	}
+}
+
+bool stm32mp_supports_second_core(void)
+{
+	uint32_t part_number = 0;
+
+	if (CFG_TEE_CORE_NB_CORE == 1)
+		return false;
+
+	if (get_part_number(&part_number)) {
+		DMSG("Cannot get part number");
+		panic();
+	}
+
+	switch (part_number) {
+	case STM32MP151F_PART_NB:
+	case STM32MP151D_PART_NB:
+	case STM32MP151C_PART_NB:
+	case STM32MP151A_PART_NB:
+		return false;
+	default:
+		return true;
+	}
+}

@@ -439,7 +439,7 @@ vaddr_t thread_get_saved_thread_sp(void)
 #endif /*ARM64*/
 
 #ifdef ARM32
-bool thread_is_in_normal_mode(void)
+bool __noprof thread_is_in_normal_mode(void)
 {
 	return (read_cpsr() & ARM32_CPSR_MODE_MASK) == ARM32_CPSR_MODE_SVC;
 }
@@ -590,9 +590,6 @@ static void init_user_kcode(void)
 
 void thread_init_primary(void)
 {
-	/* Initialize canaries around the stacks */
-	thread_init_canaries();
-
 	init_user_kcode();
 }
 
@@ -766,19 +763,6 @@ static vaddr_t get_excp_vect(void)
 
 void thread_init_per_cpu(void)
 {
-#ifdef ARM32
-	struct thread_core_local *l = thread_get_core_local();
-
-#if !defined(CFG_WITH_ARM_TRUSTED_FW)
-	/* Initialize secure monitor */
-	sm_init(l->tmp_stack_va_end + STACK_TMP_OFFS);
-#endif
-	thread_set_irq_sp(l->tmp_stack_va_end);
-	thread_set_fiq_sp(l->tmp_stack_va_end);
-	thread_set_abt_sp((vaddr_t)l);
-	thread_set_und_sp((vaddr_t)l);
-#endif
-
 	thread_init_vbar(get_excp_vect());
 
 #ifdef CFG_FTRACE_SUPPORT

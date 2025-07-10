@@ -750,9 +750,9 @@ static struct {
 	const char *parent;
 	uint8_t id;
 } sama7_utmick[] = {
-	{ .name = "utmi1", .parent = "utmick", .id = 0, },
-	{ .name = "utmi2", .parent = "utmi1", .id = 1, },
-	{ .name = "utmi3", .parent = "utmi1", .id = 2, },
+	{ .name = "utmi1ck", .parent = "utmick", .id = 0, },
+	{ .name = "utmi2ck", .parent = "utmi1ck", .id = 1, },
+	{ .name = "utmi3ck", .parent = "utmi1ck", .id = 2, },
 };
 
 /* Generic clock description */
@@ -1380,6 +1380,8 @@ static TEE_Result pmc_setup_sama7g5(const void *fdt, int nodeoffset,
 			if (p->eid) {
 				sama7g5_pmc->chws[p->eid].clk = clk;
 				sama7g5_pmc->chws[p->eid].id = p->eid;
+				sam_set_clock_range(PMC_TYPE_CORE, p->eid,
+						    p->charac->output);
 			}
 		}
 		p = &sama7g5_plls[i][PLL_TYPE_DIV];
@@ -1409,6 +1411,8 @@ static TEE_Result pmc_setup_sama7g5(const void *fdt, int nodeoffset,
 	pmc_clk = &sama7g5_pmc->chws[PMC_MCK];
 	pmc_clk->clk = mck0_clk;
 	pmc_clk->id = PMC_MCK;
+	sam_set_clock_range(PMC_TYPE_SYSTEM, PMC_MCK,
+			    &mck0_characteristics.output);
 
 	parents[0] = md_slck;
 	parents[1] = td_slck;
@@ -1455,7 +1459,7 @@ static TEE_Result pmc_setup_sama7g5(const void *fdt, int nodeoffset,
 	for (i = 0; i < ARRAY_SIZE(sama7_utmick); i++) {
 		if (strcmp("utmick", sama7_utmick[i].parent) == 0)
 			parent = clk;
-		else if (strcmp("utmi1", sama7_utmick[i].parent) == 0)
+		else if (strcmp("utmi1ck", sama7_utmick[i].parent) == 0)
 			parent = sama7g5_pmc->chws[PMC_UTMI1].clk;
 		else
 			panic();
@@ -1520,6 +1524,9 @@ static TEE_Result pmc_setup_sama7g5(const void *fdt, int nodeoffset,
 		pmc_clk = &sama7g5_pmc->phws[i];
 		pmc_clk->clk = clk;
 		pmc_clk->id = peri_clks[i].id;
+
+		sam_set_clock_range(PMC_TYPE_PERIPHERAL, peri_clks[i].id,
+				    &peri_clks[i].output);
 	}
 
 	parents[0] = md_slck;
@@ -1557,6 +1564,8 @@ static TEE_Result pmc_setup_sama7g5(const void *fdt, int nodeoffset,
 		pmc_clk = &sama7g5_pmc->ghws[i];
 		pmc_clk->clk = clk;
 		pmc_clk->id = gck->id;
+
+		sam_set_clock_range(PMC_TYPE_GCK, gck->id, &gck->output);
 	}
 
 	res = clk_set_rate(pll_frac_clk[PLL_ID_ETH], 625000000);
@@ -1564,6 +1573,28 @@ static TEE_Result pmc_setup_sama7g5(const void *fdt, int nodeoffset,
 		panic();
 
 	res = clk_set_rate(pll_div_clk[PLL_ID_ETH], 625000000);
+	if (res)
+		panic();
+
+	res = clk_set_rate(pll_frac_clk[PLL_ID_AUDIO], 983040000);
+	if (res)
+		panic();
+
+	res = clk_set_rate(pll_div_clk[PLL_ID_AUDIO], 196608000);
+	if (res)
+		panic();
+
+	clk = pmc_clk_get_by_name(sama7g5_pmc->ghws, sama7g5_pmc->ngck,
+				  "pdmc0_gclk");
+	assert(clk);
+	res = clk_set_parent(clk, pll_div_clk[PLL_ID_AUDIO]);
+	if (res)
+		panic();
+
+	clk = pmc_clk_get_by_name(sama7g5_pmc->ghws, sama7g5_pmc->ngck,
+				  "i2smcc0_gclk");
+	assert(clk);
+	res = clk_set_parent(clk, pll_div_clk[PLL_ID_AUDIO]);
 	if (res)
 		panic();
 

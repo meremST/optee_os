@@ -65,10 +65,11 @@
  * MEM_AREA_INIT_RAM_RX: init private read-only/executable memory (secure)
  * MEM_AREA_NEX_RAM_RO: nexus private read-only/non-executable memory (secure)
  * MEM_AREA_NEX_RAM_RW: nexus private r/w/non-executable memory (secure)
+ * MEM_AREA_NEX_DYN_VASPACE: nexus private dynamic memory map (secure)
+ * MEM_AREA_TEE_DYN_VASPACE: core private dynamic memory (secure)
  * MEM_AREA_TEE_COHERENT: teecore coherent RAM (secure, reserved to TEE)
  * MEM_AREA_TEE_ASAN: core address sanitizer RAM (secure, reserved to TEE)
  * MEM_AREA_IDENTITY_MAP_RX: core identity mapped r/o executable memory (secure)
- * MEM_AREA_TA_RAM:   Secure RAM where teecore loads/exec TA instances.
  * MEM_AREA_NSEC_SHM: NonSecure shared RAM between NSec and TEE.
  * MEM_AREA_NEX_NSEC_SHM: nexus non-secure shared RAM between NSec and TEE.
  * MEM_AREA_RAM_NSEC: NonSecure RAM storing data
@@ -95,10 +96,11 @@ enum teecore_memtypes {
 	MEM_AREA_INIT_RAM_RX,
 	MEM_AREA_NEX_RAM_RO,
 	MEM_AREA_NEX_RAM_RW,
+	MEM_AREA_NEX_DYN_VASPACE,
+	MEM_AREA_TEE_DYN_VASPACE,
 	MEM_AREA_TEE_COHERENT,
 	MEM_AREA_TEE_ASAN,
 	MEM_AREA_IDENTITY_MAP_RX,
-	MEM_AREA_TA_RAM,
 	MEM_AREA_NSEC_SHM,
 	MEM_AREA_NEX_NSEC_SHM,
 	MEM_AREA_RAM_NSEC,
@@ -130,10 +132,11 @@ static inline const char *teecore_memtype_name(enum teecore_memtypes type)
 		[MEM_AREA_INIT_RAM_RX] = "INIT_RAM_RX",
 		[MEM_AREA_NEX_RAM_RO] = "NEX_RAM_RO",
 		[MEM_AREA_NEX_RAM_RW] = "NEX_RAM_RW",
+		[MEM_AREA_NEX_DYN_VASPACE] = "NEX_DYN_VASPACE",
+		[MEM_AREA_TEE_DYN_VASPACE] = "TEE_DYN_VASPACE",
 		[MEM_AREA_TEE_ASAN] = "TEE_ASAN",
 		[MEM_AREA_IDENTITY_MAP_RX] = "IDENTITY_MAP_RX",
 		[MEM_AREA_TEE_COHERENT] = "TEE_COHERENT",
-		[MEM_AREA_TA_RAM] = "TA_RAM",
 		[MEM_AREA_NSEC_SHM] = "NSEC_SHM",
 		[MEM_AREA_NEX_NSEC_SHM] = "NEX_NSEC_SHM",
 		[MEM_AREA_RAM_NSEC] = "RAM_NSEC",
@@ -298,6 +301,8 @@ extern const unsigned long core_mmu_tee_load_pa;
 
 void core_init_mmu_map(unsigned long seed, struct core_mmu_config *cfg);
 void core_init_mmu_regs(struct core_mmu_config *cfg);
+/* Copy static memory map from temporary boot_mem to heap */
+void core_mmu_save_mem_map(void);
 
 /* Arch specific function to help optimizing 1 MMU xlat table */
 bool core_mmu_prefer_tee_ram_at_top(paddr_t paddr);
@@ -333,6 +338,7 @@ void core_mmu_get_user_va_range(vaddr_t *base, size_t *size);
  * @CORE_MMU_FAULT_ASYNC_EXTERNAL:	asynchronous external abort
  * @CORE_MMU_FAULT_ACCESS_BIT:		access bit fault
  * @CORE_MMU_FAULT_TAG_CHECK:		tag check fault
+ * @CORE_MMU_FAULT_SYNC_EXTERNAL:	synchronous external abort
  * @CORE_MMU_FAULT_OTHER:		Other/unknown fault
  */
 enum core_mmu_fault {
@@ -344,6 +350,7 @@ enum core_mmu_fault {
 	CORE_MMU_FAULT_ASYNC_EXTERNAL,
 	CORE_MMU_FAULT_ACCESS_BIT,
 	CORE_MMU_FAULT_TAG_CHECK,
+	CORE_MMU_FAULT_SYNC_EXTERNAL,
 	CORE_MMU_FAULT_OTHER,
 };
 
@@ -360,6 +367,12 @@ enum core_mmu_fault core_mmu_get_fault_type(uint32_t fault_descr);
  * @returns an attribute that can be passed to core_mm_set_entry() and friends
  */
 uint32_t core_mmu_type_to_attr(enum teecore_memtypes t);
+
+static inline bool core_mmu_type_is_nex_shared(enum teecore_memtypes t)
+{
+	return IS_ENABLED(CFG_NS_VIRTUALIZATION) &&
+	       (t == MEM_AREA_NEX_DYN_VASPACE || t == MEM_AREA_NEX_NSEC_SHM);
+}
 
 /*
  * core_mmu_create_user_map() - Create user mode mapping
@@ -464,6 +477,10 @@ void core_mmu_get_entry(struct core_mmu_table_info *tbl_info, unsigned idx,
 static inline unsigned core_mmu_va2idx(struct core_mmu_table_info *tbl_info,
 			vaddr_t va)
 {
+#ifdef RV64
+	if (tbl_info->level == CORE_MMU_BASE_TABLE_LEVEL)
+		va &= ~GENMASK_64(63, RISCV_MMU_VA_WIDTH);
+#endif
 	return (va - tbl_info->va_base) >> tbl_info->shift;
 }
 
@@ -499,8 +516,15 @@ static inline size_t core_mmu_get_block_offset(
  */
 static inline bool core_mmu_is_dynamic_vaspace(struct tee_mmap_region *mm)
 {
-	return mm->type == MEM_AREA_RES_VASPACE ||
-		mm->type == MEM_AREA_SHM_VASPACE;
+	switch (mm->type) {
+	case MEM_AREA_RES_VASPACE:
+	case MEM_AREA_SHM_VASPACE:
+	case MEM_AREA_NEX_DYN_VASPACE:
+	case MEM_AREA_TEE_DYN_VASPACE:
+		return true;
+	default:
+		return false;
+	}
 }
 
 /*
@@ -648,8 +672,6 @@ void core_mmu_set_default_prtn(void);
 void core_mmu_set_default_prtn_tbl(void);
 #endif
 
-void core_mmu_init_virtualization(void);
-
 /* Initialize physical memory pool */
 void core_mmu_init_phys_mem(void);
 
@@ -663,6 +685,9 @@ void core_mmu_map_region(struct mmu_partition *prtn,
 			 struct tee_mmap_region *mm);
 
 bool arch_va2pa_helper(void *va, paddr_t *pa);
+
+vaddr_t arch_aslr_base_addr(vaddr_t start_addr, uint64_t seed,
+			    unsigned int iteration_count);
 
 static inline bool core_mmu_check_end_pa(paddr_t pa, size_t len)
 {
@@ -694,13 +719,6 @@ void core_mmu_set_secure_memory(paddr_t base, size_t size);
  * configuration.
  */
 void core_mmu_get_secure_memory(paddr_t *base, paddr_size_t *size);
-
-/*
- * core_mmu_get_ta_range() - get physical memory range reserved for TAs
- * @base: [out] range base address ref or NULL
- * @size: [out] range size ref or NULL
- */
-void core_mmu_get_ta_range(paddr_t *base, size_t *size);
 
 #endif /*__ASSEMBLER__*/
 

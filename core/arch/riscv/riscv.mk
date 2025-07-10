@@ -14,6 +14,8 @@ include mk/cc-option.mk
 
 CFG_MMAP_REGIONS ?= 13
 CFG_RESERVED_VASPACE_SIZE ?= (1024 * 1024 * 10)
+CFG_NEX_DYN_VASPACE_SIZE ?= (1024 * 1024)
+CFG_TEE_DYN_VASPACE_SIZE ?= (1024 * 1024)
 
 ifeq ($(CFG_RV64_core),y)
 CFG_KERN_LINKER_FORMAT ?= elf64-littleriscv
@@ -40,6 +42,18 @@ CFG_MAX_CACHE_LINE_SHIFT ?= 6
 # Platform configuration should accordingly set CFG_CORE_LARGE_PHYS_ADDR or not.
 ifeq ($(CFG_CORE_LARGE_PHYS_ADDR),y)
 $(call force,CFG_WITH_LPAE,y)
+endif
+
+# Paged virtual-memory schemes (SvXX)
+# For RV32, the acceptable value is 32.
+# For RV64, the acceptable values are 39, 48, 57.
+CFG_RISCV_MMU_MODE ?= 39
+ifeq ($(CFG_RV64_core),y)
+$(call cfg-check-value,RISCV_MMU_MODE,39 48 57)
+else
+ifeq ($(CFG_RV32_core),y)
+$(call cfg-check-value,RISCV_MMU_MODE,32)
+endif
 endif
 
 CFG_RISCV_SBI	 ?= n

@@ -388,9 +388,9 @@ bool transfer_list_set_data_size(struct transfer_list_header *tl,
 		 * of TL
 		 */
 		mov_dis = new_ev - old_ev;
-		if (ROUNDUP_OVERFLOW(mov_dis,
-				     TL_ALIGNMENT_FROM_ORDER(tl->alignment),
-				     &mov_dis) ||
+		if (ROUNDUP2_OVERFLOW(mov_dis,
+				      TL_ALIGNMENT_FROM_ORDER(tl->alignment),
+				      &mov_dis) ||
 		    tl->size + mov_dis > tl->max_size) {
 			return false;
 		}
@@ -401,26 +401,27 @@ bool transfer_list_set_data_size(struct transfer_list_header *tl,
 		 * Move distance should be rounded down to match the entry data
 		 * alignment.
 		 */
-		mov_dis = ROUNDDOWN(old_ev - new_ev,
-				    TL_ALIGNMENT_FROM_ORDER(tl->alignment));
+		mov_dis = ROUNDDOWN2(old_ev - new_ev,
+				     TL_ALIGNMENT_FROM_ORDER(tl->alignment));
 		r_new_ev = old_ev - mov_dis;
 		tl->size -= mov_dis;
 	}
 	/* Move all following entries to fit in the expanded or shrunk space */
-	memmove((void *)r_new_ev, (void *)old_ev, tl_old_ev - old_ev);
-
-	/*
-	 * Fill the gap due to round up/down with a void entry if the size of
-	 * the gap is more than an entry header.
-	 */
-	gap = r_new_ev - new_ev;
-	if (gap >= sizeof(*dummy_te)) {
-		/* Create a dummy transfer entry to fill up the gap */
-		dummy_te = (struct transfer_list_entry *)new_ev;
-		dummy_te->tag_id = TL_TAG_EMPTY;
-		dummy_te->reserved0 = 0;
-		dummy_te->hdr_size = sizeof(*dummy_te);
-		dummy_te->data_size = gap - sizeof(*dummy_te);
+	if (tl_old_ev > old_ev) {
+		memmove((void *)r_new_ev, (void *)old_ev, tl_old_ev - old_ev);
+		/*
+		 * Fill the gap due to round up/down with a void entry if the
+		 * size of the gap is more than an entry header.
+		 */
+		gap = r_new_ev - new_ev;
+		if (gap >= sizeof(*dummy_te)) {
+			/* Create a dummy transfer entry to fill up the gap */
+			dummy_te = (struct transfer_list_entry *)new_ev;
+			dummy_te->tag_id = TL_TAG_EMPTY;
+			dummy_te->reserved0 = 0;
+			dummy_te->hdr_size = sizeof(*dummy_te);
+			dummy_te->data_size = gap - sizeof(*dummy_te);
+		}
 	}
 
 	tl_e->data_size = new_data_size;
@@ -496,7 +497,7 @@ struct transfer_list_entry *transfer_list_add(struct transfer_list_header *tl,
 	tl->size += ev - tl_ev;
 
 	if (data)
-		memmove(tl_e + tl_e->hdr_size, data, data_size);
+		memmove(transfer_list_entry_data(tl_e), data, data_size);
 
 	transfer_list_update_checksum(tl);
 
@@ -537,7 +538,7 @@ transfer_list_add_with_align(struct transfer_list_header *tl, uint16_t tag_id,
 		 * alignment. Fill the gap with an empty transfer entry as a
 		 * placeholder before adding the desired transfer entry
 		 */
-		new_tl_ev = ROUNDUP(ev, TL_ALIGNMENT_FROM_ORDER(alignment)) -
+		new_tl_ev = ROUNDUP2(ev, TL_ALIGNMENT_FROM_ORDER(alignment)) -
 			    sizeof(struct transfer_list_entry);
 		assert(new_tl_ev - tl_ev > sizeof(struct transfer_list_entry));
 		dummy_te_data_sz = new_tl_ev - tl_ev -

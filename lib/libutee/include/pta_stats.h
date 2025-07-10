@@ -38,12 +38,14 @@
 #define ALLOC_ID_PUBLIC_DDR	2	/* Public DDR allocator (deprecated) */
 #define ALLOC_ID_TA_RAM		3	/* TA_RAM allocator */
 #define ALLOC_ID_NEXUS_HEAP	4	/* Nexus heap allocator */
+#define ALLOC_ID_RPMB		5	/* RPMB secure storage */
 #define STATS_NB_POOLS		5
 
 #define TEE_ALLOCATOR_DESC_LENGTH 32
 
 struct pta_stats_alloc {
 	char desc[TEE_ALLOCATOR_DESC_LENGTH];
+	uint64_t free2_sum;               /* Sum of size^2 of each free chunk */
 	uint32_t allocated;               /* Bytes currently allocated */
 	uint32_t max_allocated;           /* Tracks max value of allocated */
 	uint32_t size;                    /* Total size for this allocator */

@@ -27,6 +27,7 @@ $(call force,CFG_TEE_CORE_NB_CORE,8)
 $(call force,CFG_ARM_GICV3,y)
 $(call force,CFG_PL011,y)
 $(call force,CFG_GIC,y)
+$(call force,CFG_DT,y)
 
 CFG_CORE_RESERVED_SHM	?= n
 CFG_CORE_DYN_SHM	?= y
@@ -34,8 +35,7 @@ CFG_WITH_STATS		?= y
 CFG_ARM64_core		?= y
 
 # Enable ARM Crypto Extensions(CE)
-$(call force,CFG_CRYPTO_WITH_CE,y)
-$(call force,CFG_CRYPTO_WITH_CE82,y)
+CFG_CRYPTO_WITH_CE ?= y
 
 # Define the number of cores per cluster used in calculating core position.
 # The cluster number is shifted by this value and added to the core ID,
@@ -48,6 +48,23 @@ $(call force,CFG_CORE_CLUSTER_SHIFT,1)
 # Default size is 128MB.
 CFG_TZDRAM_START   ?= 0x1800000
 CFG_TZDRAM_SIZE    ?= 0x8000000
+
+# Maximum size of the Device Tree Blob to accommodate
+# device tree with additional nodes.
+CFG_DTB_MAX_SIZE ?= 0x200000
+
+# Console selection
+# 0 : UART0[pl011, pl011_0] (default)
+# 1 : UART1[pl011_1]
+CFG_CONSOLE_UART ?= 0
+
+# PS GPIO Controller configuration.
+CFG_AMD_PS_GPIO ?= n
+
+ifeq ($(CFG_AMD_PS_GPIO),y)
+$(call force,CFG_MAP_EXT_DT_SECURE,y)
+$(call force,CFG_DRIVERS_GPIO,y)
+endif
 
 ifeq ($(CFG_ARM64_core),y)
 $(call force,CFG_CORE_LARGE_PHYS_ADDR,y)

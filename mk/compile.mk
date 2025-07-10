@@ -123,7 +123,7 @@ comp-cppflags-$2 = $$(filter-out $$(CPPFLAGS_REMOVE) $$(cppflags-remove) \
 		      $$(cppflags-lib$$(comp-lib-$2)) $$(cppflags-$2)) \
 		      -D__FILE_ID__=$$(subst -,_,$$(subst /,_,$$(subst .,_,$$(patsubst $$(out-dir)/%,%,$1))))
 
-comp-flags-$2 += -MD -MF $$(comp-dep-$2) -MT $$@
+comp-flags-$2 += -MD -MF $$(comp-dep-$2) -MP -MT $$@
 comp-flags-$2 += $$(comp-cppflags-$2)
 
 comp-cmd-$2 = $$(comp-compiler-$2) $$(comp-flags-$2) -c $$< -o $$@
@@ -206,7 +206,7 @@ comp-cppflags-$3 = $$(filter-out $$(CPPFLAGS_REMOVE) $$(cppflags-remove) \
 		      $$(cppflags$$(comp-sm-$3)) \
 		      $$(cppflags-lib$$(comp-lib-$3)) $$(cppflags-$3))
 
-comp-flags-$3 += -MD -MF $$(comp-dep-$3) -MT $$@
+comp-flags-$3 += -MD -MF $$(comp-dep-$3) -MP -MT $$@
 comp-flags-$3 += $$(comp-cppflags-$3)
 
 comp-cmd-$3 = $$(CC$(sm)) $$(comp-flags-$3) -fverbose-asm -S $$< -o $$@
@@ -269,9 +269,9 @@ cleanfiles := $$(cleanfiles) $2 \
 		$$(dtb-predts-$2) $$(dtb-predep-$2) \
 		$$(dtb-dep-$2) $$(dtb-cmd-file-$2)
 
-dtb-cppflags-$2 := -Icore/include/ -x assembler-with-cpp -Ulinux -Uunix \
+dtb-cppflags-$2 := -Icore/include/ -x assembler-with-cpp -undef -D__DTS__ \
 		   -E -ffreestanding $$(CPPFLAGS) \
-		   -MD -MF $$(dtb-predep-$2) -MT $$(dtb-predts-$2)
+		   -MD -MF $$(dtb-predep-$2) -MP -MT $$(dtb-predts-$2)
 
 dtb-dtcflags-$2	:= $$(DTC_FLAGS) -I dts -O dtb -Wno-unit_address_vs_reg \
 		   -d $$(dtb-dep-$2)

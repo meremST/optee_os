@@ -12,6 +12,7 @@
 #include <libfdt.h>
 #include <mm/core_memprot.h>
 #include <mm/core_mmu.h>
+#include <mm/phys_mem.h>
 #include <stdio.h>
 #include <string.h>
 #include <trace.h>
@@ -20,6 +21,7 @@ static struct dt_descriptor external_dt __nex_bss;
 
 #if defined(CFG_CORE_FFA)
 static void *manifest_dt __nex_bss;
+static size_t manifest_max_size __nex_bss;
 #endif
 
 const struct dt_driver *dt_find_compatible_driver(const void *fdt, int offs)
@@ -188,13 +190,18 @@ static size_t fdt_read_size(const uint32_t *cell, int n)
 	return sz;
 }
 
-int fdt_reg_info(const void *fdt, int offs, paddr_t *base, size_t *size)
+int fdt_get_reg_props_by_index(const void *fdt, int offs, int index,
+			       paddr_t *base, size_t *size)
 {
 	const fdt32_t *reg = NULL;
 	int addr_ncells = 0;
 	int size_ncells = 0;
+	int cell_offset = 0;
 	int parent = 0;
 	int len = 0;
+
+	if (index < 0)
+		return -FDT_ERR_BADOFFSET;
 
 	reg = (const uint32_t *)fdt_getprop(fdt, offs, "reg", &len);
 	if (!reg)
@@ -215,25 +222,34 @@ int fdt_reg_info(const void *fdt, int offs, paddr_t *base, size_t *size)
 			return -FDT_ERR_NOTFOUND;
 	}
 
-	if ((size_t)len < addr_ncells * sizeof(*reg))
+	cell_offset = index * (addr_ncells + size_ncells);
+
+	if ((size_t)len < (cell_offset + addr_ncells) * sizeof(*reg))
 		return -FDT_ERR_BADSTRUCTURE;
 
 	if (base) {
-		*base = fdt_read_paddr(reg, addr_ncells);
+		*base = fdt_read_paddr(reg + cell_offset, addr_ncells);
 		if (*base == DT_INFO_INVALID_REG)
 			return -FDT_ERR_NOTFOUND;
 	}
 
 	if (size) {
-		if ((size_t)len < (addr_ncells + size_ncells) * sizeof(*reg))
+		if ((size_t)len <
+		    (cell_offset + addr_ncells + size_ncells) * sizeof(*reg))
 			return -FDT_ERR_BADSTRUCTURE;
 
-		*size = fdt_read_size(reg + addr_ncells, size_ncells);
+		*size = fdt_read_size(reg + cell_offset + addr_ncells,
+				      size_ncells);
 		if (*size == DT_INFO_INVALID_REG_SIZE)
 			return -FDT_ERR_NOTFOUND;
 	}
 
 	return 0;
+}
+
+int fdt_reg_info(const void *fdt, int offs, paddr_t *base, size_t *size)
+{
+	return fdt_get_reg_props_by_index(fdt, offs, 0, base, size);
 }
 
 paddr_t fdt_reg_base_address(const void *fdt, int offs)
@@ -378,52 +394,6 @@ uint32_t fdt_read_uint32_default(const void *fdt, int node,
 	fdt_read_uint32_index(fdt, node, prop_name, 0, &ret);
 
 	return ret;
-}
-
-int fdt_get_reg_props_by_index(const void *fdt, int node, int index,
-			       paddr_t *base, size_t *size)
-{
-	const fdt32_t *prop = NULL;
-	int parent = 0;
-	int len = 0;
-	int address_cells = 0;
-	int size_cells = 0;
-	int cell = 0;
-
-	parent = fdt_parent_offset(fdt, node);
-	if (parent < 0)
-		return parent;
-
-	address_cells = fdt_address_cells(fdt, parent);
-	if (address_cells < 0)
-		return address_cells;
-
-	size_cells = fdt_size_cells(fdt, parent);
-	if (size_cells < 0)
-		return size_cells;
-
-	cell = index * (address_cells + size_cells);
-
-	prop = fdt_getprop(fdt, node, "reg", &len);
-	if (!prop)
-		return len;
-
-	if (((cell + address_cells + size_cells) * (int)sizeof(uint32_t)) > len)
-		return -FDT_ERR_BADVALUE;
-
-	if (base) {
-		*base = fdt_read_paddr(&prop[cell], address_cells);
-		if (*base == DT_INFO_INVALID_REG)
-			return -FDT_ERR_BADVALUE;
-	}
-
-	if (size) {
-		*size = fdt_read_size(&prop[cell + address_cells], size_cells);
-		if (*size == DT_INFO_INVALID_REG_SIZE)
-			return -FDT_ERR_BADVALUE;
-	}
-
-	return 0;
 }
 
 int fdt_get_reg_props_by_name(const void *fdt, int node, const char *name,
@@ -1004,29 +974,44 @@ int add_res_mem_dt_node(struct dt_descriptor *dt, const char *name,
 }
 
 #if defined(CFG_CORE_FFA)
-void init_manifest_dt(void *fdt)
+void init_manifest_dt(void *fdt, size_t max_size)
 {
 	manifest_dt = fdt;
+	manifest_max_size = max_size;
 }
 
 void reinit_manifest_dt(void)
 {
-	paddr_t pa = (unsigned long)manifest_dt;
+	paddr_t end_pa = 0;
 	void *fdt = NULL;
+	paddr_t pa = 0;
 	int ret = 0;
 
-	if (!pa) {
+	if (!manifest_dt) {
 		EMSG("No manifest DT found");
 		return;
 	}
 
-	fdt = core_mmu_add_mapping(MEM_AREA_MANIFEST_DT, pa, CFG_DTB_MAX_SIZE);
+	if (IS_ENABLED(CFG_CORE_SEL2_SPMC)) {
+		pa = (unsigned long)manifest_dt;
+		end_pa = pa + manifest_max_size;
+		pa = ROUNDDOWN(pa, SMALL_PAGE_SIZE);
+		end_pa = ROUNDUP(end_pa, SMALL_PAGE_SIZE);
+		if (!nex_phys_mem_alloc2(pa, end_pa - pa)) {
+			EMSG("Failed to reserve manifest DT physical memory %#"PRIxPA"..%#"PRIxPA" len %#zx",
+			     pa, end_pa - 1, end_pa - pa);
+			panic();
+		}
+	}
+
+	pa = (unsigned long)manifest_dt;
+	fdt = core_mmu_add_mapping(MEM_AREA_MANIFEST_DT, pa, manifest_max_size);
 	if (!fdt)
 		panic("Failed to map manifest DT");
 
 	manifest_dt = fdt;
 
-	ret = fdt_check_full(fdt, CFG_DTB_MAX_SIZE);
+	ret = fdt_check_full(fdt, manifest_max_size);
 	if (ret < 0) {
 		EMSG("Invalid manifest Device Tree at %#lx: error %d", pa, ret);
 		panic();
@@ -1042,20 +1027,28 @@ void *get_manifest_dt(void)
 
 static TEE_Result release_manifest_dt(void)
 {
+	paddr_t pa = 0;
+
 	if (!manifest_dt)
 		return TEE_SUCCESS;
 
+	if (IS_ENABLED(CFG_CORE_SEL2_SPMC))
+		pa = virt_to_phys(manifest_dt);
+
 	if (core_mmu_remove_mapping(MEM_AREA_MANIFEST_DT, manifest_dt,
-				    CFG_DTB_MAX_SIZE))
+				    manifest_max_size))
 		panic("Failed to remove temporary manifest DT mapping");
 	manifest_dt = NULL;
+
+	if (IS_ENABLED(CFG_CORE_SEL2_SPMC))
+		tee_mm_free(nex_phys_mem_mm_find(pa));
 
 	return TEE_SUCCESS;
 }
 
 boot_final(release_manifest_dt);
 #else
-void init_manifest_dt(void *fdt __unused)
+void init_manifest_dt(void *fdt __unused, size_t max_size __unused)
 {
 }
 

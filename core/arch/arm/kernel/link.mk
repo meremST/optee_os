@@ -52,7 +52,7 @@ link-objs-init := $(filter-out \
 		    $(out-dir)/$(arch-dir)/kernel/link_dummies_init.o, \
 		    $(objs))
 ldargs-tee.elf := $(link-ldflags) $(link-objs) $(link-out-dir)/version.o \
-		  $(link-ldadd) $(libgcccore)
+		  $(link-ldadd)
 
 link-script-cppflags := \
 	$(filter-out $(CPPFLAGS_REMOVE) $(cppflags-remove), \
@@ -62,7 +62,7 @@ link-script-cppflags := \
 
 ldargs-all_objs := -T $(link-script-dummy) --no-check-sections \
 		   $(link-ldflags-common) \
-		   $(link-objs) $(link-ldadd) $(libgcccore)
+		   $(link-objs) $(link-ldadd)
 cleanfiles += $(link-out-dir)/all_objs.o
 $(link-out-dir)/all_objs.o: $(objs) $(libdeps) $(MAKEFILE_LIST)
 	@$(cmd-echo-silent) '  LD      $@'
@@ -76,7 +76,7 @@ $(link-out-dir)/unpaged_entries.txt: $(link-out-dir)/all_objs.o
 
 unpaged-ldargs := -T $(link-script-dummy) --no-check-sections --gc-sections \
 		 $(link-ldflags-common)
-unpaged-ldadd := $(objs) $(link-ldadd) $(libgcccore)
+unpaged-ldadd := $(objs) $(link-ldadd)
 cleanfiles += $(link-out-dir)/unpaged.o
 $(link-out-dir)/unpaged.o: $(link-out-dir)/unpaged_entries.txt
 	@$(cmd-echo-silent) '  LD      $@'
@@ -105,8 +105,7 @@ $(link-out-dir)/init_entries.txt: $(link-out-dir)/all_objs.o
 
 init-ldargs := -T $(link-script-dummy) --no-check-sections --gc-sections \
 	       $(link-ldflags-common)
-init-ldadd := $(link-objs-init) $(link-out-dir)/version.o  $(link-ldadd) \
-	      $(libgcccore)
+init-ldadd := $(link-objs-init) $(link-out-dir)/version.o  $(link-ldadd)
 cleanfiles += $(link-out-dir)/init.o
 $(link-out-dir)/init.o: $(link-out-dir)/init_entries.txt
 	$(call gen-version-o)
@@ -137,7 +136,7 @@ cleanfiles += $(link-script-pp) $(link-script-dep)
 $(link-script-pp): $(link-script) $(link-script-extra-deps)
 	@$(cmd-echo-silent) '  CPP     $@'
 	@mkdir -p $(dir $@)
-	$(q)$(CPPcore) -P -MT $@ -MD -MF $(link-script-dep) \
+	$(q)$(CPPcore) -P -MT $@ -MD -MP -MF $(link-script-dep) \
 		$(link-script-cppflags) $< -o $@
 
 $(link-out-dir)/version.o:
